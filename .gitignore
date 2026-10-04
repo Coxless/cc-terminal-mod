@@ -1,0 +1,19 @@
+# Workshop: ロックファイルはリポジトリに含めてはいけない (定義 .workshop/*.yaml はコミットする)
+.workshop.lock
+
+# エディタ / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 言語別の生成物
+__pycache__/
+node_modules/
+dist/
+build/
+.env
+
+# このプロジェクト固有
+# コンパイル済みの sidecar バイナリ (bun build --compile の出力)
+mod/bin/

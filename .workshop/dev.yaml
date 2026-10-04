@@ -1,0 +1,44 @@
+# Workshop 定義ファイル (cc-terminal-mod)
+# リファレンス: https://ubuntu.com/workshop/docs/reference/definition-files/workshop-definition/
+#
+# - name はファイル名 (.workshop/<name>.yaml) と一致させる
+# - base / sdks を変更したら `workshop refresh` で反映する
+# - actions の変更は refresh 不要 (即時反映)
+#
+# ワークショップの中で動かすのは Bun (sidecar のビルドとテスト、型チェック) だけ。
+# Claude Code 本体 (`claude --plugin-dir ./mod` / `claude plugin validate` / `claude plugin test`) はホストで動かす。
+
+name: dev
+base: ubuntu@24.04
+
+sdks:
+  - name: project-bun   # .workshop/bun/ のプロジェクト内 SDK (Store に Bun の SDK が無いため)
+
+# `workshop run -- <action> [引数...]` で実行する名前付きスクリプト。
+# bash (errexit + pipefail) で実行される。プロジェクトは /project にマウントされる。
+actions:
+  setup: |
+    cd /project
+    bun install
+
+  # bun のテストは *.spec.ts。*.test.ts は `claude plugin test` 用なので対象にしない。
+  test: |
+    cd /project
+    bun test .spec.ts "$@"
+
+  # 型チェック。hooks は mod/tsconfig.json(Mod を一度ロードすると型定義が配置される)、
+  # sidecar と shared は mod/sidecar/tsconfig.json(Bun の型)。
+  lint: |
+    cd /project
+    bunx tsc -p ./mod --noEmit "$@"
+    bunx tsc -p ./mod/sidecar --noEmit "$@"
+
+  # 対象は Mod のソースだけ (設計文書とスパイクは整形しない)。
+  fmt: |
+    cd /project
+    bunx prettier --write mod "$@"
+
+  # sidecar を単一バイナリにする。出力は mod/bin/(git には入れない)。ホストでそのまま動く。
+  build: |
+    cd /project
+    bun build --compile --minify mod/sidecar/main.ts --outfile mod/bin/terminal-sidecar "$@"
