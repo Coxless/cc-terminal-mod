@@ -1,0 +1,104 @@
+# CI: push のたびに、テスト・型チェック・整形の確認・Mod の検証・sidecar のビルドを回す。
+# CD: main への push で、plugin.json の version が release ブランチと違えば、release ブランチを作り直す。
+name: CI
+
+on:
+  push:
+    branches-ignore: [release]
+
+env:
+  # Mods API は early access でリリースごとに変わる。型定義もこの版のものを使うので、固定している。
+  # 上げるときは、手元でも同じ版で確認する(CLAUDE.md の「Mods API の参照先」)。
+  CLAUDE_CODE_VERSION: 2.1.289
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bun の版は、開発環境(Workshop)と同じものを使う
+      - name: Read the Bun version
+        id: bun
+        run: echo "version=$(sed -n 's/.*BUN_VERSION:-\([0-9.]*\).*/\1/p' .workshop/bun/hooks/setup-base)" >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun.outputs.version }}
+      - run: bun install --frozen-lockfile
+
+      - name: Test (bun)
+        run: bun test .spec.ts
+
+      - name: Check formatting
+        run: bunx prettier --check mod
+
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_CODE_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # hooks の型定義(mod/.claude-plugin/types/)は、Mod をロードしたときに Claude Code が配置する。
+      # ログインしていないので実行は失敗するが、配置はその前に済む。API は呼ばれない。
+      - name: Place the Mods type definitions
+        run: |
+          claude --version
+          claude --plugin-dir ./mod -p hi < /dev/null || true
+          test -f mod/.claude-plugin/types/claude-code/index.d.ts
+
+      - name: Type check
+        run: |
+          bunx tsc -p ./mod --noEmit
+          bunx tsc -p ./mod/sidecar --noEmit
+
+      - name: Validate the mod and the marketplace
+        run: |
+          claude plugin validate ./mod
+          claude plugin validate .
+
+      - name: Test (claude plugin test)
+        run: claude plugin test ./mod
+
+      - name: Build the sidecar
+        run: bun build --compile --minify mod/sidecar/main.ts --outfile mod/bin/terminal-sidecar
+
+  release:
+    needs: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency: release
+    steps:
+      - uses: actions/checkout@v4
+
+      # 利用者に更新が届くのは version が変わったときだけなので、変わっていなければ何もしない
+      - name: Compare with the released version
+        id: version
+        run: |
+          current=$(jq -r .version mod/.claude-plugin/plugin.json)
+          released=none
+          if git fetch -q origin release 2>/dev/null; then
+            released=$(git show FETCH_HEAD:mod/.claude-plugin/plugin.json | jq -r .version)
+          fi
+          echo "current=$current released=$released"
+          if [ "$current" = "$released" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Read the Bun version
+        if: steps.version.outputs.changed == 'true'
+        id: bun
+        run: echo "version=$(sed -n 's/.*BUN_VERSION:-\([0-9.]*\).*/\1/p' .workshop/bun/hooks/setup-base)" >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+        if: steps.version.outputs.changed == 'true'
+        with:
+          bun-version: ${{ steps.bun.outputs.version }}
+
+      - name: Build and push the release branch
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          bun install --frozen-lockfile
+          bun build --compile --minify mod/sidecar/main.ts --outfile mod/bin/terminal-sidecar
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          scripts/release.sh
