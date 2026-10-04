@@ -2,7 +2,7 @@
 
 Phase 0(Feasibility Spike)の後の計画。要件は `concept-mvp.md`、構成と API の挙動の根拠は `docs/architecture.md`。
 
-- 作成日: 2026-10-05
+- 作成日: 2026-10-05(同日、進み具合を追記)
 - 対象: Claude Code v2.1.289 以降 / Linux(macOS は Phase 3)
 
 ## 全体
@@ -21,6 +21,18 @@ AC は `concept-mvp.md` §19。
 - ステップが終わるたびに、分かった事実を `docs/architecture.md` に、決定を `CLAUDE.md` の「決まっていること」に反映する。
 - 公式 API で実現できないことが見つかったら、回避策を積む前に `docs/architecture.md` の「技術的制約」に記録する。
 
+## 進み具合(2026-10-05)
+
+| 対象 | 状態 |
+| :- | :- |
+| Phase 1 Step 1〜5 | 完了。完了条件は入れ子の Claude Code(検証ハーネス)で確認した |
+| Phase 1 Step 6 | 自動で確認する項目は完了。**ユーザーが実機(Ghostty)で確認する項目が残っている** |
+| Phase 2 Step 1〜3 | 完了 |
+| Phase 2 Step 4 | アイドル時・作業中・会話の記録は確認した。compaction の後の扱いと、vim の画面からの追加(Scenario 3)は未確認 |
+| Phase 3 | 未着手。各項目をやるかどうかを、ユーザーと決めるところから |
+
+確認した内容と数値は `docs/architecture.md` の「Phase 1・2 で確認したこと」。
+
 ## 成果物の構成
 
 ```text
@@ -33,7 +45,8 @@ mod/
 ├── shared/protocol.ts           # hooks と sidecar が共有する型
 ├── shared/keys.ts               # キー → バイト列の変換(純関数)
 ├── shared/payload.ts            # Context Payload の生成(純関数。Phase 2)
-├── sidecar/                     # Bun のソースと bun test
+├── shared/*.spec.ts             # bun test
+├── sidecar/                     # Bun のソースと bun test(*.spec.ts)
 └── bin/                         # コンパイル済みの sidecar バイナリ
 ```
 
@@ -47,7 +60,9 @@ Claude への受け渡しは作らない。
 
 ### Step 1 — Bun の導入と sidecar の技術確認
 
-Bun は導入しただけで、PTY はまだ動かしていない。本実装の前に、Mod と切り離した小さなスクリプトで前提を確かめる。
+**完了(2026-10-05)。** Bun の PTY で成立し、Node.js への切り替えは不要だった。確認スクリプトは `spike/phase1/pty-check.ts`、結果は `docs/architecture.md`。
+
+本実装の前に、Mod と切り離した小さなスクリプトで前提を確かめる。
 
 やること:
 
@@ -247,8 +262,8 @@ Phase 1、2 を使ってみてから優先度を決める。着手前に、各�
 
 | 対象 | 手段 |
 | :- | :- |
-| `shared/` の純関数 | `bun test` |
-| sidecar(PTY、エミュレーション、HTTP) | `bun test`。実際にシェルを起動する |
+| `shared/` の純関数 | `bun test`(`*.spec.ts`) |
+| sidecar(PTY、エミュレーション、HTTP) | `bun test`(`*.spec.ts`)。実際にシェルを起動する |
 | hooks モジュールの振る舞い | `claude plugin test ./mod`。描画は検証しない |
 | 実際の画面とキー、マウス | Phase 0 の検証ハーネス。入れ子の Claude Code を PTY で動かす |
 | 見た目、操作感 | ユーザーが実機で確認する |

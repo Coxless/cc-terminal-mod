@@ -1,4 +1,8 @@
-# Architecture — Phase 0 Feasibility Spike の結果
+# Architecture
+
+構成と、実機で確認した API の挙動。前半は Phase 0(Feasibility Spike)の結果、後半の「Phase 1・2 で確認したこと」は本実装(`mod/`)で分かったこと。食い違う場合は後半が新しい。
+
+## Phase 0 Feasibility Spike の結果
 
 - 実施日: 2026-10-05
 - 環境: Claude Code v2.1.289 / Linux / bash / Python 3.14(Node.js は未導入)
@@ -178,11 +182,13 @@ Ctrl+ A B E F G K L N O P Q R S T U V W Y、`ctrl+\`、`ctrl+]`、`ctrl+^`、`ct
 ## 技術的制約(公式 API では回避できないもの)
 
 1. Escape / Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+X は Mod に届かない。代替キーが必須。
-2. ペーストは `Client` に届かない。代替は未検討(クリップボードを sidecar 側で読む、など)。
+2. ペーストは `Client` に届かない。プロンプト欄に入った下書きを、ペインのボタンで Terminal へ送る(Phase 1 Step 4)。
 3. `Client` 内では `Raster` が使えず、`Client` が描いた領域はネイティブの選択対象にならない。「画面をクリックしてそのまま入力」と「ドラッグで選択」を同じ領域で両立できない。
 4. `Raster` は幅 1 の BMP 文字だけ。全角・絵文字を出すなら `Text` 行で描く。
 5. `$` は変数に保存も、関数に渡すこともできない(`claude plugin validate` が拒否する)。dispatch をまたぐ処理は、`session.start` の `$` を閉じ込めたクロージャの束を持って呼ぶ。
 6. フルスクリーン表示でないと選択が読めない(Docs。未検証)。
+7. `Client` へのフォーカスは、クリックでしか移せない。`$.ui.focus` が受け付けるのは `Button` / `Input` / `Select` だけ(Phase 1 Step 4)。
+8. `Text` の色は「テーマのキー、色の名前、hex」だけ。端末の ANSI 16 色をそのまま指定する手段が無く、`red` などの名前は Claude Code 側の RGB に置き換わる。Terminal の 16 色は、ユーザーの端末の配色どおりにはならない(Phase 1 Step 3)。
 
 ## Phase 1 への決定事項
 
@@ -220,14 +226,121 @@ Phase 0 の結果から決めたこと:
 
 **未確認:** Phase 0 の環境には Bun も Node.js も無く、Bun の PTY はまだ動かしていない。resize、制御文字によるシグナル、daemon 化(親プロセスから切り離して `$.process.run` をすぐ返す)が期待どおりかを Phase 1 の Step 1 で確かめる。満たさなければ Node.js + `node-pty` に切り替える。その場合も `@xterm/headless` と通信部分はそのまま使える。
 
-Phase 1 で解くこと:
+Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 
-- Bun の PTY の確認(上記)。
-- `$.ui.focus` で `Client` にフォーカスを移せるか(クリックなしで入力を始められるか)。
-- ペーストの代替経路。
-- scrollback の見せ方(`@xterm/headless` が保持する。ペインでどうスクロールさせるかは未定)。
-- resize の debounce。
-- Ghostty の実機、tmux、非フルスクリーンでの確認。
+- Bun の PTY の確認 → 成立。
+- `$.ui.focus` で `Client` にフォーカスを移せるか → 移せない。クリックが要る。
+- ペーストの代替経路 → プロンプト欄の下書きを送るボタン。
+- scrollback の見せ方 → sidecar 側で窓を動かす。
+- resize の debounce → 120 ms。
+- Ghostty の実機、tmux、非フルスクリーンでの確認 → 未実施(ユーザーの確認待ち)。
+
+## Phase 1・2 で確認したこと
+
+- 実施日: 2026-10-05
+- 環境: Claude Code v2.1.289 / Linux / bash / Bun 1.4.2(Workshop 内)/ `@xterm/headless` 6.0.0
+- 検証方法は Phase 0 と同じ(入れ子の Claude Code を `spike/phase0/harness/drive.py` で操作)。したがって「検証方法と、その限界」に挙げた点(人の目と手、Ghostty の実機、tmux、非フルスクリーン)は、ここでも未確認のまま。
+
+### sidecar: Bun で成立(Node.js への切り替えは不要)
+
+`spike/phase1/pty-check.ts` を `bun build --compile` したバイナリを、ホストで実行した結果。Phase 0 の `/term-selftest` と同じ項目。
+
+| 項目 | 結果 |
+| :- | :- |
+| 起動コマンドが返るまで | 36〜42 ms |
+| stdin(`echo MARK-$((6*7))` → `MARK-42`) | OK |
+| resize(100×30 → `stty size` が `30 100`) | OK |
+| Ctrl+C / Ctrl+D / Ctrl+Z(制御文字を書くだけ) | OK(`rc=130` / `eof=0` / `Stopped`) |
+| 大量出力(`seq 1 200000`、1.49 MB) | 0.13 秒で末尾まで到達 |
+| `vi` を起動して終了 | alternate screen に入り、終了後に元の画面へ戻る |
+| 全角 | 幅 2 のセル + 幅 0 のセルとして取れる |
+| 色 | パレット番号と RGB を区別して取れる |
+| resize 後の画面内容 | 残る |
+| `/kill` 後 | ソケットもシェルも残らない |
+
+設計上の事実:
+
+- **Bun には `fork` が無い。** daemon 化は、起動コマンド(`terminal-sidecar start`)が自分自身を `Bun.spawn(..., { detached: true, stdio: ['ignore', log, log] })` で `daemon` モードとして起動し、ソケットが `/info` に応答するのを待って 1 行の JSON を出して終了する形にした。daemon は新しいセッションのリーダーになり、起動元の stdout の pipe を持たないので、`$.process.run` はすぐ返る。
+- コンパイル済みバイナリの中では `Bun.main` が `/$bunfs/` で始まる。自分自身の再実行は、そのとき `process.execPath` だけ、`bun main.ts` のときは `process.execPath` + `Bun.main`。
+- **`Bun.serve` の `idleTimeout` は既定で 10 秒。** long-poll(20 秒)が切られるので 60 にしている。Bun 1.4.2 の型は unix ソケットでこのオプションを受け付けないが、実行時には効く(`sidecar.spec.ts` で 12 秒の long-poll を確認)。
+- シェルは PTY のセッションリーダーなので、`process.kill(-shellPid, 'SIGHUP')` でフォアグラウンドのジョブごと止まる。
+- カーソルの表示・非表示は `@xterm/headless` の公開 API に無い。内部の `_core.coreService.isCursorHidden` を読んでいる(無ければ「表示」として扱う)。
+- `@xterm/headless` の文字幅は Unicode 6 相当。絵文字など、それ以降に幅が変わった文字の位置は未確認。
+- バイナリは約 81 MB(Bun のランタイムを含む)。`mod/bin/` は git に入れない。
+
+### 通信プロトコル
+
+型は `mod/shared/protocol.ts`。
+
+| リクエスト | 内容 |
+| :- | :- |
+| `GET /frame?since=<ver>&wait=<ms>&back=<lines>` | 画面。`since` より新しくなるか `wait` が過ぎるまで待つ。変化が無ければ `lines` を省く。`back` は末尾からさかのぼる行数 |
+| `GET /info` | PID、シェルの PID、生死、大きさ、シェルの現在の cwd(`/proc/<pid>/cwd`。取れなければ `null`) |
+| `POST /input` `{ d }` | PTY へ書く |
+| `POST /resize` `{ cols, rows }` | 大きさを変える |
+| `POST /kill` | シェルを止めて終了する |
+
+画面は、行ごとの `[テキスト, 前景色, 背景色, 属性ビット]` の並び。色は `null`(既定)、0〜15(ANSI パレットの番号)、`'#rrggbb'`。カーソル位置のセルは sidecar が反転ビットを立てて返すので、hooks モジュールはカーソルを意識しない。制御文字は sidecar が空白に置き換える。
+
+- ソケットは `$XDG_RUNTIME_DIR/cc-term/<Claude Code の PID>.sock`(無ければ `/tmp/cc-term-<uid>/`)。ディレクトリは 0700、ソケットは 0600。他人が所有するディレクトリは使わない。
+- 同じソケットで生きたシェルが動いていれば、起動せずに `already: true` を返す。シェルが終了した sidecar が残っていれば、止めて作り直す。
+- sidecar のログは `<ソケット>.log`。正常終了時に消す。
+
+### hooks モジュール
+
+- **`Text` の `color` に `ansi:red` を渡すと tree が拒否された**(`Text prop "color" must be a color (a theme key, a name, or hex)`)。`red`、`blueBright` などの名前は通るが、出力されるのは `38;2;r;g;b` の RGB で、端末の ANSI 色ではない(技術的制約 8)。
+- **inline のペインの `bodyRows` は「中身の高さ」と「レイアウトが許す高さ」の小さいほう。** 中身を `bodyRows` に合わせると、いったん低くなったあと戻らない(リロード直後の 1 行の表示をきっかけに 3 行まで縮んだ)。外側の `Box` に `minHeight`(頼んだ行数)を付けて中身の高さを保ち、Terminal の行数だけを `bodyRows` に合わせると安定した。40 行の端末では Terminal は 9 行になる。
+- 窓からはみ出した下の余白が見えないのは、`ui.scroll` の hook が窓を動かさないため。
+- **dispatch の中で始めた `$` 呼び出しを避けるため、入力の送信と画面の取り直しは `$.clock.after(0, …)` で外へ出している。** `ui.message` の hook は ack をすぐ返し、PTY への書き込みは 1 本の送信ループが順に行う(並行した POST の到着順は保証されないため)。
+- キーの連番は `Client` のインスタンスごと。インスタンスが作り直されると 1 に戻るので、`Client` が自分の id を一緒に送り、hooks 側は id が変わったら連番を数え直す。
+- sidecar のバイナリが無いときは `$.process.run` が `ENOENT` で失敗し、ペインに `Failed to start shell.` と理由、`[ Retry ]` が出る。Claude Code のセッションは続く。
+
+### キー入力(Step 4)
+
+- `vi` でファイルを編集して保存できた(挿入、`ctrl+]` で Escape、`:wq`。全角を含む)。`less`、`top` を操作して終了できた。
+- `sleep 100` を `alt+c` で止められた(`rc=130`)。
+- 4 ms 間隔で 42 文字を打って、抜けも順序の入れ替わりも無かった。
+- **`$.ui.focus({ requestId, key })` では `Client` にフォーカスを移せない。** 数秒待ったあと `{ deny: 'no element of its own is drawn under that key' }` が返る。型定義も、対象を `Button` / `Input` / `Select` としている。`/term` の直後はプロンプトにフォーカスが残るので、帯をクリックしてから打つ(技術的制約 7)。待ちのあいだ `/term` が返らなくなるので、呼ばない。
+- **ペーストの代替:** ペインの `[ Paste prompt text ]` ボタン。端末でペーストするとテキストはプロンプト欄に入る。ボタンを押すと `$.prompt.read()` で下書きを読み、PTY へ書き、`$.prompt.fill({ text: '' })` で欄を空にする。アプリが bracketed paste を有効にしていれば `ESC [200~` 〜 `ESC [201~` で括る。クリップボードを直接読む方式(`wl-paste` など外部コマンドが要る)は採らなかった。
+- DECCKM(`vi` などが有効にする)のあいだ、矢印キーは `ESC O A` 形式で送る。フレームに `appCursor` を含めている。
+- `alt+b` / `alt+f` は `left` / `right` + `meta` として届くので、`ESC b` / `ESC f` に戻して送る(本物の alt+矢印と区別できない)。
+
+### scrollback(Step 5)
+
+- 履歴は sidecar(`@xterm/headless`)が持つ。上限は 5000 行。
+- 見せ方は「sidecar 側で窓を動かす」方式。`/frame` の `back` に、末尾からさかのぼる行数を渡す。ペインに描くのは常に 1 画面ぶんなので、履歴が長くても描画量は変わらない。
+- 操作: ペインの上でホイール(`ui.scroll` の hook が `by` を受け取る)、または `shift+PageUp` / `shift+PageDown`(`Client` にフォーカスがあるとき)。
+- さかのぼっている間に出力が増えても、見ている位置を保つ(履歴が増えたぶん `back` を足す)。キーを打つと末尾へ戻る。
+- alternate screen のあいだは履歴が無い(`back` は 0 になる)。
+- `seq 1 1000` の後、先頭の `1` までさかのぼれ、その位置でドラッグした選択を `$.ui.selection()` で読めた。
+
+### Context Bridge(Phase 2)
+
+- `/term-add` と、ペインの `[ Add to Claude ]` ボタン。どちらも同じ処理。
+- ペイロードの `Working directory` は、追加の時点で sidecar に問い合わせたシェルの cwd。`cd /tmp` の後の追加が `/tmp` になった。取れなければ行ごと出さない。
+- **アイドル時:** 追加してもターンは始まらず、次のプロンプトで Claude が中身(「空行、3、4」)を答えた。
+- **作業中:** `sleep 20` のツール実行中に追加した `MIDTURN-MARK-7781` を、同じターンの応答で Claude が報告した。
+- 記録(`~/.claude/projects/.../<session>.jsonl`)には、`origin: { kind: 'plugin', name: 'terminal' }`、`isMeta: true` の user 行として残る。Terminal で実行しただけで選択していない出力(`SECRET-NOT-4242-SHARED`)は、記録に現れなかった。
+- 選択が会話側(`selected.requestId` がある)なら、Terminal の内容ではないので追加しない。
+- **選択は、追加した後も残る。** 続けて `/term-add` すると同じ内容がもう一度追加される。
+- 表示の 4 通り: 成功は toast とコマンドの出力行、選択なし・追加の失敗・選択が読めない環境はそれぞれ理由の 1 行(ボタンからは toast)。「選択が読めない環境」の文言は Docs に基づくもので、実機では出していない。
+- `/clear` の後は、追加した行も会話ごと無くなる(シェルは残る)。compaction の後の扱いは未確認。
+
+### テストキット(`claude plugin test`)で分かったこと
+
+- 対象は `*.test.ts`。`bun test` 用のテストは `*.spec.ts` にして、互いに拾わないようにしている。
+- `$` の呼び出し(`process.run`、`http.fetch`、`env.get`、`ui.open` など)に答えるテスト側の hook は `{ value }` を返す。`session.start` や `session.end` のようなイベントは、テストが `on(...)` で底を用意しないと `no implementation` になる。
+- `$.clock.after` は `mock.clock(on)` を入れないと拒否される。進めるのは `clock.advance(ms)`。
+- **プラグインが呼ぶ `$.session.append` は、テスト側の `on('session.append')` に届かなかった**(`no implementation for session.append`)。追加の成功は実機で確認し、テストでは失敗時の表示を確認している。
+
+### まだ確認できていないこと
+
+- 実際の端末(Ghostty)での色、全角の位置ずれ、打鍵の遅延、マウス操作の感触、大量ログでの体感。
+- tmux の中と、非フルスクリーン表示。
+- 絵文字など、`@xterm/headless` の幅の表と端末の幅が食い違う文字。
+- フル機能の vim(確認したのは `vim.tiny`)。zsh、fish。
+- compaction の後に、追加した行がどう扱われるか。
+- macOS(cwd の取得は `/proc` に依存している)。
 
 ## スパイクの動かし方
 
@@ -244,3 +357,7 @@ claude --plugin-dir ./spike/phase0
 | `/term-stats` | 描画の統計をログに出す |
 
 ログは `$XDG_RUNTIME_DIR/cc-term/spike-log.jsonl`(`CC_TERM_SPIKE_LOG` で変更可)。sidecar は `python3` が必要で、pyte と wcwidth を `sidecar/vendor/` に同梱している。
+
+Phase 1 Step 1 の確認スクリプトは `spike/phase1/pty-check.ts`(`workshop exec -- bun spike/phase1/pty-check.ts`)。
+
+検証ハーネス(`spike/phase0/harness/drive.py`)の制御用ディレクトリは、Unix ソケットのパス長の制限があるので短い場所(`$XDG_RUNTIME_DIR` の下など)に置く。

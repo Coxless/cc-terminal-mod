@@ -160,6 +160,8 @@ Terminal Paneは「見た目だけのTerminal」ではなく、PTYを利用し�
 
 **Phase 0 で確認した制約:** Escape / Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+X とペーストは Claude Code 本体が処理し、Mod には届かない。Terminal へは代替キーで送る。当面の割り当ては `ctrl+]` = Escape、`alt+c` / `alt+d` / `alt+z` / `alt+x` = Ctrl+C / D / Z / X。詳細は `docs/architecture.md` §2。
 
+**Phase 1 で確認した制約:** キー入力を始めるには、ペイン上端の帯をクリックする必要がある。ペーストは、プロンプト欄に入ったテキストをペインのボタンで Terminal へ送る。Terminal の 16 色は Claude Code 側の色に置き換わり、端末の配色どおりにはならない。
+
 ### Shell
 
 MVPではユーザーのデフォルトシェルを使用する。
@@ -971,11 +973,16 @@ Phase 0 で答えが出たもの。根拠は `docs/architecture.md`。
 | Terminal を右に置くか下に置くか | Claude Code が決める。110 列以上は右に dock、それ未満はプロンプトの上に inline |
 | Terminal Pane を開く操作 | `/term` コマンド |
 
+Phase 1 で答えが出たもの。根拠は `docs/architecture.md` の「Phase 1・2 で確認したこと」。
+
+| 問い | 答え |
+| :- | :- |
+| クリックなしで Terminal にフォーカスを移せるか | 移せない。`$.ui.focus` は `Client` を対象にできない。ペイン上端の帯をクリックしてから打つ |
+| ペーストをどう Terminal に届けるか | ペーストはプロンプト欄に入るので、ペインの `[ Paste prompt text ]` ボタンでその下書きを Terminal へ送る |
+| scrollback をペインでどうスクロールさせるか | ホイール、または `shift+PageUp` / `shift+PageDown`。履歴は 5000 行まで |
+
 残っているもの:
 
-- クリックなしで Terminal にフォーカスを移せるか(`$.ui.focus`)
-- ペーストをどう Terminal に届けるか
-- scrollback をペインでどうスクロールさせるか
 - 代替キーの割り当てを見直すか、設定可能にするか
 - tmux、非フルスクリーン表示での選択
 - Claude Code アップデート時の互換性。Mods API は early access でリリースごとに変わる。対象バージョンを明示し、更新のたびに `claude plugin validate` とテストを回す
