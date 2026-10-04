@@ -1,0 +1,7 @@
+# プロジェクト内 SDK: Bun をワークショップに入れる。
+# Store に Bun の SDK が無いため、公式リリースの zip を hooks/setup-base で展開する。
+name: bun
+summary: Bun JavaScript runtime
+description: |
+  Installs a pinned Bun release (runtime, bundler, test runner, package manager)
+  into /usr/local/bin of the workshop.
