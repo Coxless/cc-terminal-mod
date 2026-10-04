@@ -415,6 +415,13 @@ Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 - `$.clock.after` は `mock.clock(on)` を入れないと拒否される。進めるのは `clock.advance(ms)`。
 - **プラグインが呼ぶ `$.session.append` は、テスト側の `on('session.append')` に届かなかった**(`no implementation for session.append`)。追加の成功は実機で確認し、テストでは失敗時の表示を確認している。
 
+### 配布(2026-10-05)
+
+- 対応は Linux x64 だけ。sidecar のバイナリが Linux x64 用で、シェルの cwd の取得も `/proc` に依存している。ほかのプラットフォームでは、バイナリを実行できず、ペインに `Failed to start shell.` と理由が出る(未確認)。
+- バイナリ(約 81 MB)は開発用のブランチには入れない。配布用の `release` ブランチにだけ入れる。`release` は「HEAD のツリー + バイナリ」の、親の無い 1 コミット。毎回 force push で置き換えるので、古いバイナリは履歴に残らない。作るのは `scripts/release.sh`。
+- マーケットプレイスの定義は `.claude-plugin/marketplace.json`。プラグインの `source` は `git-subdir`(`ref: release`、`path: mod`)。Claude Code は `mod/` だけを sparse checkout で取る。
+- 利用者に更新が届くのは、`plugin.json` の `version` が変わったときだけ(Docs)。`release` を出し直しても、version が同じなら利用者はキャッシュのまま。
+
 ### まだ確認できていないこと
 
 ユーザーは実機で MVP を動かした(2026-10-05)。ただし、下の項目ごとの結果は、まだ聞き取っていない。分かったものから、この一覧から外して該当の節に書く。
@@ -429,7 +436,6 @@ Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 - compaction の後に、追加した行がどう扱われるか。
 - 選択モードの見た目(反転と、選択カーソルの色)。フォーカスの表示の色。
 - 選択モードを、非フルスクリーン表示と tmux で使えるか。
-- macOS(cwd の取得は `/proc` に依存している)。
 
 ## スパイクの動かし方
 
