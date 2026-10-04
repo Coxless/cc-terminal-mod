@@ -12,7 +12,7 @@ Claude Code を終了せずに、その場で Terminal Pane を開いて操作�
 - MVP は実装済み。Mod 本体は `mod/`。内訳は、Phase 1(Terminal Only)、Phase 2(Context Bridge)、使ってみて出た改善要望 2 回ぶん(フォーカスの表示、送った Context の可視化、選択モード、キーボードでの送信、下の行の整理とヘルプ)。
 - 完了条件は、入れ子の Claude Code(検証ハーネス)で確認した。ユーザーも実機で MVP を動かした(2026-10-05)。ただし、実機での項目ごとの結果(色と反転の見え方、打鍵の遅延、`alt+` のキーが届くか、など)は、まだ記録していない。
 - 確認が残っているもの: 上の実機の項目、tmux・非フルスクリーン、compaction 後の扱い、vim 画面からのマウス選択での追加。一覧は `docs/architecture.md` の「まだ確認できていないこと」。
-- Phase 3(Polish)は、「配布」だけ実施した(Linux x64 のみ、`release` ブランチに同梱)。ほかは未着手。着手前に、各項目をやるかどうかをユーザーと決める。項目は `docs/implementation-plan.md`。
+- Phase 3(Polish)は、「配布」だけ実施した(Linux x64 のみ、`main` ブランチに同梱)。ほかは未着手。着手前に、各項目をやるかどうかをユーザーと決める。項目は `docs/implementation-plan.md`。
 - `spike/phase0/` は Phase 0 の PoC(Python sidecar)と検証ハーネス、`spike/phase1/` は Bun の PTY の確認スクリプト。PoC は参照用。検証ハーネス(`spike/phase0/harness/drive.py`)は、いまも使う。
 
 ## 決まっていること
@@ -39,7 +39,8 @@ Claude Code を終了せずに、その場で Terminal Pane を開いて操作�
 - Terminal の内容を Claude に自動で渡さない。渡すのは人間が選択して明示的に操作したときだけ。Mod は選択テキストを解釈・要約・実行しない。
 - Terminal 側の失敗で Claude Code のセッションを落とさない。
 - 対応するのは Linux x64 だけ。macOS など、ほかのプラットフォームには対応しない(ユーザーの判断、2026-10-05)。
-- 配布は、このリポジトリをマーケットプレイスにする(`.claude-plugin/marketplace.json`、名前は `coxless`)。プラグインの取得元は `release` ブランチの `mod/`。`release` ブランチは「ソースのツリー + sidecar のバイナリ」の 1 コミットだけを持ち、`scripts/release.sh` が毎回 force push で作り直す。手で編集しない。ふだんは CI が `main` への push で実行する。
+- ブランチは 2 本。開発は `develop`、配布は `main`。リリースは、`develop` を `main` に取り込むこと(pull request。squash せず、マージコミットで入れる)。`main` に直接コミットしない。
+- 配布は、このリポジトリをマーケットプレイスにする(`.claude-plugin/marketplace.json`、名前は `coxless`)。プラグインの取得元は `main` の `mod/`。sidecar のバイナリは `main` にだけ入れる。入れるのは CI で、手ではコミットしない(`develop` では `.gitignore` の対象)。
 - MVP の Non-goals(`concept-mvp.md` §2)を実装しない: 複数 Terminal、タブ、履歴永続化、Claude による Terminal 自動操作など。
 - 公式 API で実現できないことは、回避策を積む前に「技術的制約」として `docs/architecture.md` に記録する。
 
@@ -57,9 +58,8 @@ Mods は Claude Code v2.1.287 以降が必要。これまでの確認は、す�
 ## 構成と開発コマンド
 
 ```text
-.claude-plugin/marketplace.json  # マーケットプレイスの定義(プラグインの取得元は release ブランチの mod/)
-scripts/release.sh               # release ブランチを作って push する
-.github/workflows/ci.yml         # CI(検証)と CD(main で version が変わったら配布)
+.claude-plugin/marketplace.json  # マーケットプレイスの定義(プラグインの取得元は main の mod/)
+.github/workflows/ci.yml         # CI(検証)と CD(main への push でバイナリをビルドしてコミット)
 mod/
 ├── .claude-plugin/plugin.json   # name: "terminal", version, description
 ├── hooks/hooks.json             # { "modules": ["./register.tsx"] }
@@ -107,13 +107,13 @@ sidecar のソースを変えたら `workshop run -- build` を実行する。�
 
 CI と配布(`.github/workflows/ci.yml`):
 
-- `release` 以外のブランチへの push のたびに、`bun test`、prettier の確認、`tsc` 2 回、`claude plugin validate`(Mod とマーケットプレイス)、`claude plugin test`、sidecar のビルドを回す。
-- `main` への push では、続けて配布も行う。`mod/.claude-plugin/plugin.json` の `version` が `release` ブランチのものと違うときだけ、ビルドして `scripts/release.sh` で `release` を作り直す。同じなら何もしない。
-- **配布の手順は「`version` を上げて `main` にマージする」だけ。** `version` を変えないと、利用者に更新が届かない。
+- `develop` / `main` への push と、pull request のたびに、`bun test`、prettier の確認、`tsc` 2 回、`claude plugin validate`(Mod とマーケットプレイス)、`claude plugin test`、sidecar のビルドを回す。
+- `main` への push では、続けて sidecar をビルドし、`mod/bin/terminal-sidecar` を `main` にコミットする(`github-actions[bot]`)。バイナリが前回と同じなら、コミットしない。
+- **リリースの手順:** `develop` で `mod/.claude-plugin/plugin.json` の `version` を上げる → `develop` から `main` へ pull request → マージ。`version` を変えないと利用者に更新が届かないので、`main` 向けの pull request は、`version` が `main` と同じだと CI が落ちる。
+- `main` には、CI が足したバイナリのコミットがある(`develop` には無い)。次のリリースでも衝突はしない(`develop` はそのパスに触れない)。squash でマージすると履歴が分かれて衝突するので、マージコミットで入れる。
+- マージしてから CI がバイナリをコミットするまでの数分は、`main` のバイナリが 1 つ前のもの。
 - CI の Claude Code の版は、ワークフローの `CLAUDE_CODE_VERSION` で固定している。Bun の版は `.workshop/bun/hooks/setup-base` から読む。
 - hooks の型定義は git に無い。CI では、未ログインのまま `claude --plugin-dir ./mod -p hi` を実行して配置させている(実行は失敗するが、配置はその前に済む。API は呼ばれない)。
-- 手元から配布するとき(CI が使えないとき): `workshop run -- build && scripts/release.sh`。未コミットの変更がある、バイナリがソースより古い、`version` が前回と同じ、のどれかで止まる。
-- 利用者が `/plugin marketplace add Coxless/cc-terminal-mod` で入れられるのは、`marketplace.json` が既定ブランチ(`main`)にあるときだけ。
 
 変更したら回すもの: `workshop run -- build`、`workshop run -- test`、`workshop run -- lint`、`claude plugin validate ./mod`、`claude plugin test ./mod`。CI も同じものを回す。
 

@@ -1,10 +1,12 @@
-# CI: push のたびに、テスト・型チェック・整形の確認・Mod の検証・sidecar のビルドを回す。
-# CD: main への push で、plugin.json の version が release ブランチと違えば、release ブランチを作り直す。
+# CI: develop / main への push と pull request で、テスト・型チェック・整形の確認・Mod の検証・sidecar のビルドを回す。
+# CD: main への push(= リリース)で、sidecar をビルドし、バイナリを main にコミットする。
+#     main が配布用のブランチで、マーケットプレイス(.claude-plugin/marketplace.json)は main の mod/ を参照している。
 name: CI
 
 on:
   push:
-    branches-ignore: [release]
+    branches: [develop, main]
+  pull_request:
 
 env:
   # Mods API は early access でリリースごとに変わる。型定義もこの版のものを使うので、固定している。
@@ -17,6 +19,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+
+      # 利用者に更新が届くのは plugin.json の version が変わったときだけ。上げ忘れたリリースを止める
+      - name: Require a version bump (pull requests into main)
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: |
+          git fetch -q --depth=1 origin main
+          released=$(git show FETCH_HEAD:mod/.claude-plugin/plugin.json 2>/dev/null | jq -r .version || true)
+          current=$(jq -r .version mod/.claude-plugin/plugin.json)
+          echo "current=$current released=${released:-none}"
+          if [ "$current" = "$released" ]; then
+            echo "::error file=mod/.claude-plugin/plugin.json::version $current is already on main. Bump \"version\" before releasing."
+            exit 1
+          fi
 
       # Bun の版は、開発環境(Workshop)と同じものを使う
       - name: Read the Bun version
@@ -64,7 +79,7 @@ jobs:
 
   release:
     needs: check
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -73,32 +88,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # 利用者に更新が届くのは version が変わったときだけなので、変わっていなければ何もしない
-      - name: Compare with the released version
-        id: version
-        run: |
-          current=$(jq -r .version mod/.claude-plugin/plugin.json)
-          released=none
-          if git fetch -q origin release 2>/dev/null; then
-            released=$(git show FETCH_HEAD:mod/.claude-plugin/plugin.json | jq -r .version)
-          fi
-          echo "current=$current released=$released"
-          if [ "$current" = "$released" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
-
       - name: Read the Bun version
-        if: steps.version.outputs.changed == 'true'
         id: bun
         run: echo "version=$(sed -n 's/.*BUN_VERSION:-\([0-9.]*\).*/\1/p' .workshop/bun/hooks/setup-base)" >> "$GITHUB_OUTPUT"
       - uses: oven-sh/setup-bun@v2
-        if: steps.version.outputs.changed == 'true'
         with:
           bun-version: ${{ steps.bun.outputs.version }}
 
-      - name: Build and push the release branch
-        if: steps.version.outputs.changed == 'true'
+      # バイナリは main にだけ入れる(develop では .gitignore の対象)。中身が前回と同じならコミットしない。
+      # GITHUB_TOKEN での push は、ワークフローを起動しない。
+      - name: Build the sidecar and commit it to main
         run: |
           bun install --frozen-lockfile
           bun build --compile --minify mod/sidecar/main.ts --outfile mod/bin/terminal-sidecar
+          git add -f mod/bin/terminal-sidecar
+          if git diff --cached --quiet; then
+            echo "The sidecar binary is unchanged. Nothing to commit."
+            exit 0
+          fi
+          version=$(jq -r .version mod/.claude-plugin/plugin.json)
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          scripts/release.sh
+          git commit -m "Release $version: update the sidecar binary (built from $(git rev-parse --short HEAD))"
+          git push origin HEAD:main

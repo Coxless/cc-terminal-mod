@@ -6,12 +6,7 @@
     {
       "name": "terminal",
       "description": "Open a real terminal pane inside Claude Code and hand selected text to Claude (Linux x64 only)",
-      "source": {
-        "source": "git-subdir",
-        "url": "https://github.com/Coxless/cc-terminal-mod.git",
-        "path": "mod",
-        "ref": "release"
-      }
+      "source": "./mod"
     }
   ]
 }

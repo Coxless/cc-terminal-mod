@@ -418,16 +418,19 @@ Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 ### 配布(2026-10-05)
 
 - 対応は Linux x64 だけ。sidecar のバイナリが Linux x64 用で、シェルの cwd の取得も `/proc` に依存している。ほかのプラットフォームでは、バイナリを実行できず、ペインに `Failed to start shell.` と理由が出る(未確認)。
-- バイナリ(約 81 MB)は開発用のブランチには入れない。配布用の `release` ブランチにだけ入れる。`release` は「HEAD のツリー + バイナリ」の、親の無い 1 コミット。毎回 force push で置き換えるので、古いバイナリは履歴に残らない。作るのは `scripts/release.sh`(CI が `main` への push で実行する)。
-- マーケットプレイスの定義は `.claude-plugin/marketplace.json`。プラグインの `source` は `git-subdir`(`ref: release`、`path: mod`)。Claude Code は `mod/` だけを sparse checkout で取る。
-- 利用者に更新が届くのは、`plugin.json` の `version` が変わったときだけ(Docs)。`release` を出し直しても、version が同じなら利用者はキャッシュのまま。
+- ブランチは、開発が `develop`、配布が `main`。リリースは `develop` を `main` に取り込むこと。
+- マーケットプレイスの定義は `.claude-plugin/marketplace.json`。プラグインの `source` は相対パスの `./mod`。利用者が `Coxless/cc-terminal-mod` を追加すると既定ブランチ(`main`)が clone され、その `mod/` が使われる。
+- バイナリ(約 81 MB)は `main` にだけ入れる。`main` への push のたびに CI がビルドし、前回と中身が違えばコミットする。`develop` では `.gitignore` の対象のまま。
+- バイナリが変わるたびに、`main` の履歴は約 81 MB 増える。GitHub の 1 ファイルの上限(100 MB)には収まっている。
+- 利用者に更新が届くのは、`plugin.json` の `version` が変わったときだけ(Docs)。`main` 向けの pull request は、`version` が `main` と同じだと CI が落ちる。
+- 最初に試した方式(配布専用の `release` ブランチを、親の無い 1 コミットとして毎回 force push で作り直す。プラグインの `source` は `git-subdir` の `ref: release`)は、ユーザーの判断でやめた。この方式でのインストールは、隔離した設定ディレクトリで通ることを確認していた。
 
 ### CI(2026-10-05)
 
 - `claude plugin validate` と `claude plugin test` は、ログインしていない環境でも動く。
 - **hooks の型定義(`mod/.claude-plugin/types/`)は、validate や test では配置されない。** Mod をロードしたときに配置される。未ログインの `claude --plugin-dir ./mod -p hi` は `Not logged in` で終わるが、その時点で型定義は配置されている。CI はこれを使って `tsc` を回している。
 - sidecar のテスト(実際にシェルを PTY で起動する)は、GitHub Actions の runner(Ubuntu 24.04)でも通った。
-- `main` での配布のジョブは、マージ前なのでまだ動かしていない。
+- `main` での配布のジョブ(バイナリのコミット)は、最初のリリースまで動かない。
 
 ### まだ確認できていないこと
 
