@@ -39,7 +39,7 @@ Claude Code を終了せずに、その場で Terminal Pane を開いて操作�
 - Terminal の内容を Claude に自動で渡さない。渡すのは人間が選択して明示的に操作したときだけ。Mod は選択テキストを解釈・要約・実行しない。
 - Terminal 側の失敗で Claude Code のセッションを落とさない。
 - 対応するのは Linux x64 だけ。macOS など、ほかのプラットフォームには対応しない(ユーザーの判断、2026-10-05)。
-- 配布は、このリポジトリをマーケットプレイスにする(`.claude-plugin/marketplace.json`、名前は `coxless`)。プラグインの取得元は `release` ブランチの `mod/`。`release` ブランチは「ソースのツリー + sidecar のバイナリ」の 1 コミットだけを持ち、`scripts/release.sh` が毎回 force push で作り直す。手で編集しない。
+- 配布は、このリポジトリをマーケットプレイスにする(`.claude-plugin/marketplace.json`、名前は `coxless`)。プラグインの取得元は `release` ブランチの `mod/`。`release` ブランチは「ソースのツリー + sidecar のバイナリ」の 1 コミットだけを持ち、`scripts/release.sh` が毎回 force push で作り直す。手で編集しない。ふだんは CI が `main` への push で実行する。
 - MVP の Non-goals(`concept-mvp.md` §2)を実装しない: 複数 Terminal、タブ、履歴永続化、Claude による Terminal 自動操作など。
 - 公式 API で実現できないことは、回避策を積む前に「技術的制約」として `docs/architecture.md` に記録する。
 
@@ -59,6 +59,7 @@ Mods は Claude Code v2.1.287 以降が必要。これまでの確認は、す�
 ```text
 .claude-plugin/marketplace.json  # マーケットプレイスの定義(プラグインの取得元は release ブランチの mod/)
 scripts/release.sh               # release ブランチを作って push する
+.github/workflows/ci.yml         # CI(検証)と CD(main で version が変わったら配布)
 mod/
 ├── .claude-plugin/plugin.json   # name: "terminal", version, description
 ├── hooks/hooks.json             # { "modules": ["./register.tsx"] }
@@ -104,18 +105,17 @@ workshop refresh                    # dev.yaml の base / sdks、SDK の hooks �
 
 sidecar のソースを変えたら `workshop run -- build` を実行する。バイナリは git に無いので、clone した直後も必要。中身は `bun build --compile --minify mod/sidecar/main.ts --outfile mod/bin/terminal-sidecar`。
 
-配布するとき(ホストで実行する):
+CI と配布(`.github/workflows/ci.yml`):
 
-```bash
-# 1. mod/.claude-plugin/plugin.json の version を上げてコミットする(変えないと、利用者に更新が届かない)
-# 2. ビルドして release ブランチへ push する
-workshop run -- build && scripts/release.sh
-claude plugin validate .            # マーケットプレイスの定義を変えたとき
-```
+- `release` 以外のブランチへの push のたびに、`bun test`、prettier の確認、`tsc` 2 回、`claude plugin validate`(Mod とマーケットプレイス)、`claude plugin test`、sidecar のビルドを回す。
+- `main` への push では、続けて配布も行う。`mod/.claude-plugin/plugin.json` の `version` が `release` ブランチのものと違うときだけ、ビルドして `scripts/release.sh` で `release` を作り直す。同じなら何もしない。
+- **配布の手順は「`version` を上げて `main` にマージする」だけ。** `version` を変えないと、利用者に更新が届かない。
+- CI の Claude Code の版は、ワークフローの `CLAUDE_CODE_VERSION` で固定している。Bun の版は `.workshop/bun/hooks/setup-base` から読む。
+- hooks の型定義は git に無い。CI では、未ログインのまま `claude --plugin-dir ./mod -p hi` を実行して配置させている(実行は失敗するが、配置はその前に済む。API は呼ばれない)。
+- 手元から配布するとき(CI が使えないとき): `workshop run -- build && scripts/release.sh`。未コミットの変更がある、バイナリがソースより古い、`version` が前回と同じ、のどれかで止まる。
+- 利用者が `/plugin marketplace add Coxless/cc-terminal-mod` で入れられるのは、`marketplace.json` が既定ブランチ(`main`)にあるときだけ。
 
-`scripts/release.sh` は、未コミットの変更がある、バイナリがソースより古い、version が前回と同じ、のどれかで止まる。利用者が `/plugin marketplace add Coxless/cc-terminal-mod` で入れられるのは、`marketplace.json` が既定ブランチ(`main`)にあるときだけ。
-
-変更したら回すもの: `workshop run -- build`、`workshop run -- test`、`workshop run -- lint`、`claude plugin validate ./mod`、`claude plugin test ./mod`。
+変更したら回すもの: `workshop run -- build`、`workshop run -- test`、`workshop run -- lint`、`claude plugin validate ./mod`、`claude plugin test ./mod`。CI も同じものを回す。
 
 実際の画面とキーの確認は、検証ハーネスで入れ子の Claude Code を動かす: `python3 spike/phase0/harness/drive.py serve <ctl-dir> 180 45 -- claude --debug --plugin-dir ./mod`。`<ctl-dir>` は Unix ソケットのパス長の制限があるので短い場所(`$XDG_RUNTIME_DIR` の下など)にする。入れ子のセッションでプロンプトを送ると、実際に Claude が応答する(API を使う)。
 

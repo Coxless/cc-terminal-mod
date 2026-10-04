@@ -13,10 +13,10 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Bun の版は、開発環境(Workshop)と同じものを使う
       - name: Read the Bun version
@@ -65,13 +65,13 @@ jobs:
   release:
     needs: check
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
     concurrency: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 利用者に更新が届くのは version が変わったときだけなので、変わっていなければ何もしない
       - name: Compare with the released version

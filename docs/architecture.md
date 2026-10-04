@@ -418,9 +418,16 @@ Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 ### 配布(2026-10-05)
 
 - 対応は Linux x64 だけ。sidecar のバイナリが Linux x64 用で、シェルの cwd の取得も `/proc` に依存している。ほかのプラットフォームでは、バイナリを実行できず、ペインに `Failed to start shell.` と理由が出る(未確認)。
-- バイナリ(約 81 MB)は開発用のブランチには入れない。配布用の `release` ブランチにだけ入れる。`release` は「HEAD のツリー + バイナリ」の、親の無い 1 コミット。毎回 force push で置き換えるので、古いバイナリは履歴に残らない。作るのは `scripts/release.sh`。
+- バイナリ(約 81 MB)は開発用のブランチには入れない。配布用の `release` ブランチにだけ入れる。`release` は「HEAD のツリー + バイナリ」の、親の無い 1 コミット。毎回 force push で置き換えるので、古いバイナリは履歴に残らない。作るのは `scripts/release.sh`(CI が `main` への push で実行する)。
 - マーケットプレイスの定義は `.claude-plugin/marketplace.json`。プラグインの `source` は `git-subdir`(`ref: release`、`path: mod`)。Claude Code は `mod/` だけを sparse checkout で取る。
 - 利用者に更新が届くのは、`plugin.json` の `version` が変わったときだけ(Docs)。`release` を出し直しても、version が同じなら利用者はキャッシュのまま。
+
+### CI(2026-10-05)
+
+- `claude plugin validate` と `claude plugin test` は、ログインしていない環境でも動く。
+- **hooks の型定義(`mod/.claude-plugin/types/`)は、validate や test では配置されない。** Mod をロードしたときに配置される。未ログインの `claude --plugin-dir ./mod -p hi` は `Not logged in` で終わるが、その時点で型定義は配置されている。CI はこれを使って `tsc` を回している。
+- sidecar のテスト(実際にシェルを PTY で起動する)は、GitHub Actions の runner(Ubuntu 24.04)でも通った。
+- `main` での配布のジョブは、マージ前なのでまだ動かしていない。
 
 ### まだ確認できていないこと
 

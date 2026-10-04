@@ -280,8 +280,8 @@ Phase 1、2 を使ってみてから優先度を決める。着手前に、各�
 | マウス | Terminal 内のアプリ(vim、less)へのマウス転送。選択と両立しないので、やるなら切り替え方式を決める |
 | 画面クリックで入力 | `Client` に画面を描かせて選択を自作する方式(`docs/architecture.md` 技術的制約 3)。クリップボードへのコピーも含む |
 | ~~macOS~~ | やらない。対応は Linux x64 だけ(ユーザーの判断、2026-10-05) |
-| 配布 | 実施済み(2026-10-05)。Linux x64 のバイナリを `release` ブランチに同梱する(`scripts/release.sh`)。このリポジトリがマーケットプレイス(`.claude-plugin/marketplace.json`)。README を追加した。CI でのビルドはしていない(手元でビルドして push する) |
-| API 追従 | 対象バージョンの明記。Claude Code の更新時に回す確認手順 |
+| 配布 | 実施済み(2026-10-05)。Linux x64 のバイナリを `release` ブランチに同梱する(`scripts/release.sh`)。このリポジトリがマーケットプレイス(`.claude-plugin/marketplace.json`)。README を追加した。CI(`.github/workflows/ci.yml`)が、`main` で `version` が変わったときにビルドして `release` を作り直す |
+| API 追従 | 対象バージョンの明記。Claude Code の更新時に回す確認手順。CI は `CLAUDE_CODE_VERSION` で版を固定しているので、上げて CI を回せば、validate・型チェック・テストまでは確認できる |
 
 ### 使ってみて出た改善要望(2026-10-05)
 
