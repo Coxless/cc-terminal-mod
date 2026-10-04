@@ -9,12 +9,11 @@ Claude Code を終了せずに、その場で Terminal Pane を開いて操作�
 ## 現在の状態
 
 - Phase 0(Feasibility Spike)は完了。判定は Go。
-- Phase 1(Terminal Only)の Step 1〜5 と、Phase 2(Context Bridge)の Step 1〜3 は実装済み。Mod 本体は `mod/`。完了条件は、入れ子の Claude Code(検証ハーネス)で確認した。
-- 残っているのは、ユーザーが実機(Ghostty)で確認する項目(Phase 1 Step 6)、Phase 2 Step 4 のうち compaction 後の扱いと vim 画面からの追加、tmux・非フルスクリーンでの確認。一覧は `docs/architecture.md` の「まだ確認できていないこと」。
-- 使ってみて出た改善要望 4 件(フォーカスの表示、送った Context の可視化、キーボードでの選択、キーボードでの送信)は実装済み。検証ハーネスで確認した。色と反転の見え方は実機で未確認。
-- 改善要望その 2(`a:` / `p:` の表示、上端の帯の削除とヘルプ、下の行の整理)は実装済み。検証ハーネスで確認した。実機では未確認。ショートカットでの切り替えは、いったん見送った(コマンド行を試作して外した)。
-- Phase 3(Polish)のほかの項目は未着手。着手前に、各項目をやるかどうかをユーザーと決める。
-- `spike/phase0/` は Phase 0 の PoC(Python sidecar)、`spike/phase1/` は Bun の PTY の確認スクリプト。どちらも参照用。
+- MVP は実装済み。Mod 本体は `mod/`。内訳は、Phase 1(Terminal Only)、Phase 2(Context Bridge)、使ってみて出た改善要望 2 回ぶん(フォーカスの表示、送った Context の可視化、選択モード、キーボードでの送信、下の行の整理とヘルプ)。
+- 完了条件は、入れ子の Claude Code(検証ハーネス)で確認した。ユーザーも実機で MVP を動かした(2026-10-05)。ただし、実機での項目ごとの結果(色と反転の見え方、打鍵の遅延、`alt+` のキーが届くか、など)は、まだ記録していない。
+- 確認が残っているもの: 上の実機の項目、tmux・非フルスクリーン、compaction 後の扱い、vim 画面からのマウス選択での追加。一覧は `docs/architecture.md` の「まだ確認できていないこと」。
+- Phase 3(Polish)は未着手。着手前に、各項目をやるかどうかをユーザーと決める。項目は `docs/implementation-plan.md`。
+- `spike/phase0/` は Phase 0 の PoC(Python sidecar)と検証ハーネス、`spike/phase1/` は Bun の PTY の確認スクリプト。PoC は参照用。検証ハーネス(`spike/phase0/harness/drive.py`)は、いまも使う。
 
 ## 決まっていること
 
@@ -23,9 +22,10 @@ Claude Code を終了せずに、その場で Terminal Pane を開いて操作�
 - sidecar は TypeScript + Bun。PTY は Bun 組み込み、VT エミュレータは `@xterm/headless`。`bun build --compile` で単一バイナリにして Mod に同梱する(Phase 1 Step 1 で成立を確認済み。Node.js への切り替えは不要)。
 - hooks モジュールと sidecar の通信は Unix ソケット上の HTTP(`$.http.fetch` の `socketPath`)。出力は long-poll。
 - 画面は hooks モジュールが `Text` 行で描く。キーは `Client` で受ける。カーソルは sidecar が反転属性として画面に含める。
-- Terminal に入力するには、ペインの下の行の `[ Terminal input ]` をクリックする。キーボードだけで Terminal に切り替える手段は置かない(ユーザーの判断で見送り。`Input` のコマンド行を試作したが外した)。Terminal の画面のクリックでは入力にならない。
-- ペインの下の行は、左詰めで `[ Terminal input ]` `[ Add to Claude ]` `[ Help ]` と状態(1 行)。`[ Terminal input ]` は `Client` で、当たり判定は見出しの上だけ。ポインタが乗っている間、`Button` と同じく反転させる。状態に出すのは、接続中、シェルの終了、さかのぼっている位置、選択の範囲だけ(画面の大きさなどは出さない)。ボタンに `hotkey` は付けない。
-- ペインの上端に帯は置かない。`Client` は下の行の左端に置き、`[ Terminal input ]`(クリックでキーを受ける)、受けている間は `TERMINAL · alt+h: help`、選択モードでは `SELECT` と出す。以下で「帯」と書いているのは、この `Client` のこと。
+- ペインは、Terminal の画面と、その下の 1 行。下の行は左詰めで `[ Terminal input ]` `[ Add to Claude ]` `[ Help ]` と状態。上端には何も置かない。
+- `[ Terminal input ]` が `Client`。以下で「帯」と書いているのは、この `Client` のこと。クリックするとキーを受ける。受けている間は `TERMINAL · alt+h: help`、選択モードでは `SELECT` と出す。当たり判定は見出しの上だけ。ポインタが乗っている間、`Button` と同じく反転させる。
+- Terminal に入力するには、帯をクリックする。キーボードだけで Terminal に切り替える手段は置かない(ユーザーの判断で見送り。`Input` のコマンド行を試作したが外した)。Terminal の画面のクリックでは入力にならない。
+- 状態に出すのは、接続中、シェルの終了、さかのぼっている位置、選択の範囲だけ(画面の大きさなどは出さない)。ボタンに `hotkey` は付けない。
 - キーの割り当ての説明は、ペインのヘルプに出す(Terminal の行の代わりに描く)。開くのは `alt+h`(`Client` がキーを受けている間)と `[ Help ]`。どのキーでも閉じ、そのキーは PTY に送らない。文面は `mod/shared/keys.ts` の `HELP_LINES`。
 - コマンドは `/term`(開く)、`/term-hide`(閉じる。シェルは残す)、`/term-add`(選択を Claude に渡す)。すべて `immediate: true`。
 - キーボードでの選択は「選択モード」。`alt+v` で入り、vi 風のキーで動き、`v` / `V` で始点、`enter` で Claude に渡す、`q` / `ctrl+]` で取り消す。`alt+a` は、マウスで選択したテキストを渡す。どれも帯がキーを受けている間だけ効く。割り当ては `mod/shared/keys.ts`。
@@ -50,7 +50,7 @@ API は early access でリリースごとに変わる。記憶や本ファイ�
 - 公式 Docs: https://code.claude.com/docs/ja/plugins/mods/ 配下の `overview` / `create` / `interface` / `events` / `api` / `test` / `troubleshoot` / `reference`
 - 組み込み mod のソース(`/diff` ペインがキーバインドとスクロールの実例): https://github.com/anthropics/claude-code/tree/main/mods
 
-Mods は Claude Code v2.1.287 以降が必要。Phase 0 の検証環境は v2.1.289。
+Mods は Claude Code v2.1.287 以降が必要。これまでの確認は、すべて v2.1.289 で行った。
 
 ## 構成と開発コマンド
 
@@ -61,8 +61,8 @@ mod/
 ├── hooks/register.tsx           # hooks モジュール。export const register: Register = on => { ... }
 ├── hooks/keys.tsx               # Client の surface モジュール(キー入力)
 ├── hooks/terminal.test.ts       # claude plugin test 用(*.test.ts)
-├── shared/                      # hooks と sidecar が共有する型と純関数($ に触れない)。protocol / keys / payload
-├── sidecar/                     # Bun のソース。main(起動と daemon 化)/ session(PTY と画面)/ server(HTTP)
+├── shared/                      # hooks と sidecar が共有する型と純関数($ に触れない)。protocol / keys / payload と *.spec.ts
+├── sidecar/                     # Bun のソース。main(起動と daemon 化)/ session(PTY、画面、選択モード)/ server(HTTP)と sidecar.spec.ts
 └── bin/terminal-sidecar         # コンパイル済みの sidecar バイナリ(git に入れない)
 ```
 
@@ -108,7 +108,7 @@ sidecar のソースを変えたら `workshop run -- build` を実行する。�
 
 ## hooks モジュールを書くときの制約
 
-Phase 0〜2 で実機確認したもの。根拠と数値は `docs/architecture.md`。
+実際の Claude Code(v2.1.289。入れ子のセッションと検証ハーネス)で確認したもの。根拠と数値は `docs/architecture.md`。
 
 ### 実行環境
 

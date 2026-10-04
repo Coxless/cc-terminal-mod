@@ -1,12 +1,18 @@
 # Architecture
 
-構成と、実機で確認した API の挙動。前半は Phase 0(Feasibility Spike)の結果、後半の「Phase 1・2 で確認したこと」は本実装(`mod/`)で分かったこと。食い違う場合は後半が新しい。
+構成と、実機で確認した API の挙動。
+
+読み方:
+
+- 「構成」と「技術的制約」は、いまの実装(`mod/`)に合わせてある。
+- 「Phase 0 Feasibility Spike の結果」から §6 までは、スパイク(`spike/phase0/`)の記録。当時のまま残している。後で変わった点には「→」で注記を付けた。
+- 「Phase 1・2 で確認したこと」は本実装で分かったこと。Phase 0 の記述と食い違う場合は、こちらが新しい。この中でも、「キーボードでの切り替えとコマンド行」は、後の「下の行の整理」で取り消した試作の記録。
 
 ## Phase 0 Feasibility Spike の結果
 
 - 実施日: 2026-10-05
 - 環境: Claude Code v2.1.289 / Linux / bash / Python 3.14(Node.js は未導入)
-- スパイクのコード: `spike/phase0/`(本実装ではない。sidecar は Python + pyte。Phase 1 で TypeScript + Bun に作り直す)
+- スパイクのコード: `spike/phase0/`(本実装ではない。sidecar は Python + pyte。本実装の sidecar は、Phase 1 で TypeScript + Bun に作り直した)
 
 ## 判定: Go
 
@@ -34,26 +40,31 @@
 - **tmux と非フルスクリーン表示。** Docs によれば `$.ui.selection()` は `undefined` になる。未検証。
 - エディタは `vim.tiny`(`vi`)で確認した。フル機能の vim は未導入。
 - 作業中(mid-turn)の `fill` / `submit` / `context` は未検証。作業中に確認したのは `append` だけ。
-- `tsc` による型チェックは未実施(Node.js が無い)。`claude plugin validate` は通っている。
+- `tsc` による型チェックは未実施(Node.js が無い)。`claude plugin validate` は通っている。→ 本実装では `workshop run -- lint` で `tsc` を回している。
 
-これらは Phase 1 の受け入れ確認(`docs/implementation-plan.md` の Phase 1 Step 6)で、ユーザーが実機で触って埋める。
+いまも残っているものは、末尾の「まだ確認できていないこと」にまとめた。
 
 ## 構成
+
+本実装(`mod/`)の構成。
 
 ```text
 Claude Code プロセス
 └─ hooks モジュール (register.tsx)          DOM も Node も無い。外へは $ だけ
    ├─ $.process.run ──起動──▶ sidecar (daemon 化して子プロセスの寿命から離れる)
    ├─ $.http.fetch(socketPath) ◀─HTTP over Unix socket─▶ sidecar
-   │     POST /input /resize /kill、GET /frame(long-poll)
-   ├─ ui.render (Pane) ── 画面を Text 行 または Raster で描く
-   ├─ $.ui.blit ───────── Raster を再レンダリングなしで書き換える
-   └─ ui.message ◀─ surface.post ─ Client (keys.tsx): onKey でキーを受ける
+   │     GET /frame(long-poll)/info /selection、POST /input /resize /select /kill
+   ├─ ui.render (Pane) ── 画面を Text 行で描く。下の行に Client とボタン
+   ├─ ui.message ◀─ surface.post ─ Client (keys.tsx): onKey でキーを受ける
+   └─ $.session.append ── 人が選択したテキストを Claude に渡す
 
-sidecar: PTY + シェル + VT エミュレーション。画面の状態を持つのはここ
+sidecar (Bun): PTY + シェル + VT エミュレーション (@xterm/headless)。
+               画面、履歴、選択モードの状態を持つのはここ
 ```
 
 `concept-mvp.md` §15 は `$.process.spawn` でシェルを直接起動する図だったが、それでは成立しない(stdin が起動時の 1 回きりで、PTY も resize も無い)。PTY は sidecar が持つ。
+
+スパイクでは `Raster` + `$.ui.blit` での描画も試した(§3)。全角を出せないので、本実装では使っていない。
 
 ## 1. プロセス: sidecar + Unix ソケット — 成立
 
@@ -74,7 +85,7 @@ sidecar: PTY + シェル + VT エミュレーション。画面の状態を持�
 
 設計上の事実:
 
-- sidecar は double fork + `setsid` で daemon 化する。`$.process.run` は親がすぐ終了するので待たされない。`$.process.spawn` の子はモジュールのリロードで kill されるため、使わない。
+- スパイクの sidecar(Python)は double fork + `setsid` で daemon 化する。→ Bun には `fork` が無いので、本実装は別の形(「sidecar: Bun で成立」)。`$.process.run` は親がすぐ終了するので待たされない。`$.process.spawn` の子はモジュールのリロードで kill されるため、使わない。
 - 出力は `GET /frame?since=<ver>&wait=<ms>` の long-poll で読む。`$.http.fetch` はボディを読み切ってから解決するので、ストリーミングはできない。
 - `socketPath` は絶対パスで 100 バイト前後まで。`$XDG_RUNTIME_DIR/cc-term/<pid>.sock` を使った。
 - **ソケット名に session id を使ってはいけない。** `/clear` で session id が変わり、その後 `session.start` も来ない。Claude Code 本体の PID(`$.process.run(['sh','-c','echo $PPID'])`)はプロセスの寿命のあいだ安定している。
@@ -111,7 +122,7 @@ Ctrl+ A B E F G K L N O P Q R S T U V W Y、`ctrl+\`、`ctrl+]`、`ctrl+^`、`ct
 
 - **制御文字を含む文字列を `Text` に入れると tree が拒否され、`Client` は unmount される。** 生のエスケープシーケンスで届くキーをそのまま表示して踏んだ。表示前に必ずエスケープする。
 - `surface.post` は 1 フレーム 1 件で後勝ち。キーに連番を振り、hooks 側の ack(`ui.message` の戻り値 `{ props }`)が来るまで未送達分をまとめて再送する。この方式で取りこぼしは観測していない。
-- `Client` はクリックしないとキーを受けない。ペインを `focus: true` で開いてもペインの Button にフォーカスが行くだけ。`$.ui.focus({ requestId, key })` で `Client` へ移せるかは未検証。
+- `Client` はクリックしないとキーを受けない。ペインを `focus: true` で開いてもペインの Button にフォーカスが行くだけ。`$.ui.focus({ requestId, key })` で `Client` へ移せるかは未検証。→ 移せない(技術的制約 7)。
 - **プロンプトにフォーカスがある状態で Claude の作業中に Escape を押すと、ターンが中断される。** vim の癖で Escape を連打すると Claude を止めてしまう。`Client` にフォーカスがある間の 1 回目はフォーカスが戻るだけで、中断はされなかった。
 
 ## 3. 描画 — 成立
@@ -137,7 +148,7 @@ Ctrl+ A B E F G K L N O P Q R S T U V W Y、`ctrl+\`、`ctrl+]`、`ctrl+^`、`ct
 
 - `Client` の要素表には `Raster` が無いので、キー入力の領域と `Raster` は別の要素になる。スパイクでは 1 行の `Client`(クリックして入力を始める帯)の下に画面を置いた。
 - ペインの配置は幅で決まる。180 列ではトランスクリプトの右に dock(本体 80 列)、100 列ではプロンプトの上に inline。
-- **inline のペインは中身の高さに合わせて伸びる。** `bodyRows` から端末の行数を決めると循環する。inline では行数を固定する。36 行の端末では見える高さが 10 行ほどで、それを超える分はペイン内スクロールになる。
+- **inline のペインは中身の高さに合わせて伸びる。** `bodyRows` から端末の行数を決めると循環する。inline では行数を固定する。→ 本実装は固定をやめ、外側の `Box` の `minHeight` で中身の高さを保つ形にした(「hooks モジュール」)。36 行の端末では見える高さが 10 行ほどで、それを超える分はペイン内スクロールになる。
 - プロンプト欄が複数行になる、許可ダイアログが出る、といった本体側の変化でペインの高さが変わる。そのたびに resize が走るので、debounce が要る。
 - **`ui.render` の dispatch 内から始めた `$` 呼び出しは、次の再描画で `ui.render: superseded` として中断される。** resize などの副作用は `$.clock.after(0, …)` で dispatch の外へ出す。
 
@@ -151,7 +162,7 @@ Ctrl+ A B E F G K L N O P Q R S T U V W Y、`ctrl+\`、`ctrl+]`、`ctrl+^`、`ct
 - ペイン内から始めた選択はペイン内に収まる。トランスクリプト側から始めてペインにまたがると、境界線ごと矩形で取れてしまう。
 - 選択後に Escape を押しても選択は残る。`immediate: true` のコマンドなら Claude の作業中でも読める。
 
-選択機能の自作は不要。
+マウスでの選択については、選択機能の自作は不要。→ キーボードでの選択は、後から選択モードとして sidecar に作った(「改善要望への対応」)。
 
 ## 5. Claude への受け渡し — `$.session.append` を使う
 
@@ -162,11 +173,11 @@ Ctrl+ A B E F G K L N O P Q R S T U V W Y、`ctrl+\`、`ctrl+]`、`ctrl+^`、`ct
 | `$.prompt.fill` | プロンプト欄に下書きとして入った | 未検証 |
 | `$.prompt.submit` | **即座に新しいターンが始まり**、Claude が応答した | 未検証(Docs ではアイドルまで待つ) |
 
-「選択して Context に追加し、あとで自分の言葉で指示する」(§20 Scenario 2)に合うのは `append`。ユーザーには見えない行なので、`$.ui.toast` とコマンドの出力行で追加を知らせる。
+「選択して Context に追加し、あとで自分の言葉で指示する」(§20 Scenario 2)に合うのは `append`。ユーザーには見えない行なので、`$.ui.toast` とコマンドの出力行で追加を知らせる。→ 後から `$.ui.log` での表示も足した(「送った Context の可視化」)。
 
 `$.prompt.submit` は合わない。追加した瞬間にターンが始まる。加えて、`command.run` の hook から直接呼ぶと拒否される(`called from a command.run hook, it would wait on the turn this hook is holding`)。
 
-ペイロードの `Working directory` は、スパイクでは Claude Code の cwd を入れた。シェルで `cd` した後は実際の cwd とずれる。sidecar が `/proc/<shell pid>/cwd` を返せば正確になる。
+ペイロードの `Working directory` は、スパイクでは Claude Code の cwd を入れた。シェルで `cd` した後は実際の cwd とずれる。sidecar が `/proc/<shell pid>/cwd` を返せば正確になる。→ Phase 2 Step 2 でそうした。
 
 ## 6. PTY の保持 — 成立
 
@@ -200,7 +211,7 @@ Phase 0 の結果から決めたこと:
 - Mod の配置は `mod/`、プラグイン名は `terminal`。`spike/phase0/` は参照用に残す。
 - PTY と VT エミュレーションは sidecar が持つ。hooks モジュールは画面の状態を持たない(リロードで失われるため)。
 - 通信は Unix ソケット上の HTTP。出力は long-poll。ソケット名は Claude Code の PID。
-- 画面は hooks モジュールが `Text` 行で描く。キーは 1 行の `Client` で受ける。
+- 画面は hooks モジュールが `Text` 行で描く。キーは `Client` で受ける。
 - 受け渡しは `$.session.append`。コマンドは `immediate: true`。
 - `session.end` は `reason` が `clear` 以外のときだけ sidecar を止める。
 
@@ -225,16 +236,16 @@ Phase 0 の結果から決めたこと:
 - 単一バイナリにすれば、利用者に Bun も Node.js も要求しない。
 - hooks モジュールと同じ言語なので、通信プロトコルの型を 1 か所(`mod/shared/protocol.ts`)に書ける。
 
-**未確認:** Phase 0 の環境には Bun も Node.js も無く、Bun の PTY はまだ動かしていない。resize、制御文字によるシグナル、daemon 化(親プロセスから切り離して `$.process.run` をすぐ返す)が期待どおりかを Phase 1 の Step 1 で確かめる。満たさなければ Node.js + `node-pty` に切り替える。その場合も `@xterm/headless` と通信部分はそのまま使える。
+Phase 0 の時点では Bun の PTY を動かしていなかった。resize、制御文字によるシグナル、daemon 化を Phase 1 の Step 1 で確かめ、すべて成立した。Node.js + `node-pty` への切り替えは不要だった。
 
 Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 
 - Bun の PTY の確認 → 成立。
 - `$.ui.focus` で `Client` にフォーカスを移せるか → 移せない。クリックが要る。
-- ペーストの代替経路 → プロンプト欄の下書きを送るボタン。
+- ペーストの代替経路 → プロンプト欄の下書きを送るボタンを作ったが、後で削除した。いまは手段が無い(技術的制約 2)。
 - scrollback の見せ方 → sidecar 側で窓を動かす。
 - resize の debounce → 120 ms。
-- Ghostty の実機、tmux、非フルスクリーンでの確認 → 未実施(ユーザーの確認待ち)。
+- Ghostty の実機、tmux、非フルスクリーンでの確認 → 「まだ確認できていないこと」。
 
 ## Phase 1・2 で確認したこと
 
@@ -304,7 +315,7 @@ Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 - `sleep 100` を `alt+c` で止められた(`rc=130`)。
 - 4 ms 間隔で 42 文字を打って、抜けも順序の入れ替わりも無かった。
 - **`$.ui.focus({ requestId, key })` では `Client` にフォーカスを移せない。** 数秒待ったあと `{ deny: 'no element of its own is drawn under that key' }` が返る。型定義も、対象を `Button` / `Input` / `Select` としている。`/term` の直後はプロンプトにフォーカスが残るので、帯をクリックしてから打つ(技術的制約 7)。待ちのあいだ `/term` が返らなくなるので、呼ばない。
-- **ペーストの代替:** ペインの `[ Paste prompt text ]` ボタン。端末でペーストするとテキストはプロンプト欄に入る。ボタンを押すと `$.prompt.read()` で下書きを読み、PTY へ書き、`$.prompt.fill({ text: '' })` で欄を空にする。アプリが bracketed paste を有効にしていれば `ESC [200~` 〜 `ESC [201~` で括る。クリップボードを直接読む方式(`wl-paste` など外部コマンドが要る)は採らなかった。
+- **ペーストの代替(後で削除した。「下の行の整理」):** ペインの `[ Paste prompt text ]` ボタン。端末でペーストするとテキストはプロンプト欄に入る。ボタンを押すと `$.prompt.read()` で下書きを読み、PTY へ書き、`$.prompt.fill({ text: '' })` で欄を空にする。アプリが bracketed paste を有効にしていれば `ESC [200~` 〜 `ESC [201~` で括る。クリップボードを直接読む方式(`wl-paste` など外部コマンドが要る)は採らなかった。
 - DECCKM(`vi` などが有効にする)のあいだ、矢印キーは `ESC O A` 形式で送る。フレームに `appCursor` を含めている。
 - `alt+b` / `alt+f` は `left` / `right` + `meta` として届くので、`ESC b` / `ESC f` に戻して送る(本物の alt+矢印と区別できない)。
 
@@ -365,6 +376,8 @@ Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 
 ### キーボードでの切り替えとコマンド行(2026-10-05)
 
+**ここに書いたコマンド行(`Input`)、`[ All keys ]`、`[ Paste prompt text ]`、コマンド行の `?` は、次の「下の行の整理」で外した。いまの実装には無い。** API の挙動の記録と、再開するときの材料として残している。
+
 要望は「Claude Code と Terminal の切り替えをショートカットで行う」と「`a: Add to Claude` / `p: Paste prompt text` の使い方がわからない(`p` を押すと Terminal に入力された)」。プローブ用の Mod と検証ハーネスで確認した。
 
 - **`Client` にキーボードだけでフォーカスを移す手段は無い。** `ctrl+x tab` でペインの枠にフォーカスを移した後、Tab と Enter を押しても `Client` には届かない(リングは `Button` と本体の閉じるマークを巡る)。技術的制約 7 のとおり。
@@ -404,7 +417,12 @@ Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 
 ### まだ確認できていないこと
 
+ユーザーは実機で MVP を動かした(2026-10-05)。ただし、下の項目ごとの結果は、まだ聞き取っていない。分かったものから、この一覧から外して該当の節に書く。
+
 - 実際の端末(Ghostty)での色、全角の位置ずれ、打鍵の遅延、マウス操作の感触、大量ログでの体感。
+- Ghostty で `alt+h` / `alt+v` / `alt+a` / `alt+c` などの `alt+` のキーが届くか。届くキーが検証ハーネスと違うか(kitty keyboard protocol)。
+- inline(110 列未満)での下の行の見え方。
+- vim の画面からマウスで選択して追加する(`concept-mvp.md` §20 Scenario 3)。
 - tmux の中と、非フルスクリーン表示。
 - 絵文字など、`@xterm/headless` の幅の表と端末の幅が食い違う文字。
 - フル機能の vim(確認したのは `vim.tiny`)。zsh、fish。
@@ -415,13 +433,15 @@ Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 
 ## スパイクの動かし方
 
+本実装(`mod/`)のコマンドは `CLAUDE.md`。ここは Phase 0 の PoC の動かし方。
+
 ```bash
 claude --plugin-dir ./spike/phase0
 ```
 
 | コマンド | 動作 |
 | :- | :- |
-| `/term [raster\|text\|client]` | ペインを開く。上端の帯をクリックしてから入力する |
+| `/term [raster\|text\|client]` | ペインを開く。上端の帯をクリックしてから入力する(スパイクの配置。本実装は下の行の `[ Terminal input ]`) |
 | `/term-hide` | ペインを閉じる(PTY は残る) |
 | `/term-add [append\|fill\|submit\|context]` | 選択テキストを Claude に渡す |
 | `/term-selftest` | sidecar の自己診断 |
