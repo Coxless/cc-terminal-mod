@@ -1,5 +1,5 @@
 // PTY + シェル + VT エミュレーション。画面の状態を持つのはここだけ。
-import { Terminal } from '@xterm/headless'
+import { Terminal, type IMarker } from '@xterm/headless'
 import { readlinkSync } from 'node:fs'
 import {
   ATTR_BOLD,
@@ -15,6 +15,8 @@ import {
   type Color,
   type Frame,
   type Run,
+  type SelectInfo,
+  type SelectOp,
 } from '../shared/protocol'
 
 export type SessionOptions = {
@@ -52,6 +54,21 @@ function paletteColor(i: number): Color {
   return hex((v << 16) | (v << 8) | v)
 }
 
+// 選択モードの位置。y は履歴も含めたバッファ上の行。履歴が上限で削られると行がずれるので、
+// 通常の画面では marker で追う(alternate screen には履歴が無い)
+type Pos = { x: number; y: number; m?: IMarker }
+type Selection = { cur: Pos; anchor: Pos | null; line: boolean; alt: boolean }
+// 1 行の中で反転する範囲(セル、両端を含む)と、選択カーソルの位置。無ければ -1
+type Highlight = { from: number; to: number; cur: number }
+
+// 選択カーソルの色(ANSI パレットの番号)
+const SELECT_CURSOR_FG = 0
+const SELECT_CURSOR_BG = 3
+
+// 単語単位の移動で使う文字の種類: 0 = 空白、1 = 単語、2 = 記号
+const WORD = /[\p{L}\p{N}_]/u
+const charClass = (ch: string) => (ch === ' ' ? 0 : WORD.test(ch) ? 1 : 2)
+
 export class Session {
   readonly shell: string
   cols: number
@@ -64,6 +81,7 @@ export class Session {
   private proc: Bun.Subprocess
   private waiters: (() => void)[] = []
   private cell
+  private sel: Selection | null = null
 
   constructor(opts: SessionOptions) {
     this.shell = opts.shell
@@ -131,7 +149,240 @@ export class Session {
       }
     }
     this.term.resize(cols, rows)
+    if (this.sel !== null) {
+      this.sel.cur.x = Math.min(this.sel.cur.x, cols - 1)
+      if (this.sel.anchor !== null) this.sel.anchor.x = Math.min(this.sel.anchor.x, cols - 1)
+    }
     this.bump()
+  }
+
+  private pin(x: number, y: number): Pos {
+    const b = this.term.buffer.active
+    const m = b.type === 'normal' ? this.term.registerMarker(y - (b.baseY + b.cursorY)) : undefined
+    return { x, y, m: m ?? undefined }
+  }
+
+  private rowOf(p: Pos): number {
+    if (p.m === undefined) return p.y
+    // 履歴から削られた行は、先頭に丸める
+    return p.m.isDisposed || p.m.line < 0 ? 0 : p.m.line
+  }
+
+  private clearSelect() {
+    this.sel?.cur.m?.dispose()
+    this.sel?.anchor?.m?.dispose()
+    this.sel = null
+  }
+
+  // 行のセルごとの文字。全角文字の 2 セル目は ''、空のセルは ' '
+  private rowCells(y: number): string[] {
+    const line = this.term.buffer.active.getLine(y)
+    const cells: string[] = []
+    for (let x = 0; x < this.cols; x++) {
+      const c = line?.getCell(x, this.cell)
+      cells.push(c === undefined ? ' ' : c.getWidth() === 0 ? '' : c.getChars() || ' ')
+    }
+    return cells
+  }
+
+  // 行末の空白を除いた長さ(セル)
+  private rowLength(cells: string[]): number {
+    let len = 0
+    for (let x = 0; x < cells.length; x++) {
+      if (cells[x] !== ' ' && cells[x] !== '') len = x + (cells[x + 1] === '' ? 2 : 1)
+    }
+    return len
+  }
+
+  // セルごとの文字の種類。全角文字の 2 セル目は、1 セル目と同じ
+  private rowClasses(y: number): number[] {
+    const classes: number[] = []
+    for (const ch of this.rowCells(y)) classes.push(ch === '' ? (classes[classes.length - 1] ?? 0) : charClass(ch))
+    return classes
+  }
+
+  // x を行の中身の範囲に収め、全角文字の 2 セル目なら 1 セル目に寄せる
+  private clampX(x: number, y: number): number {
+    const cells = this.rowCells(y)
+    x = clamp(x, 0, Math.max(0, this.rowLength(cells) - 1))
+    return cells[x] === '' && x > 0 ? x - 1 : x
+  }
+
+  // 選択モードの操作。`back` はいま表示している位置で、選択カーソルが見えるように動かして返す
+  select(op: SelectOp, back: number): { active: boolean; back: number; select: SelectInfo | null } {
+    const b = this.term.buffer.active
+    const alt = b.type === 'alternate'
+    const last = b.baseY + this.rows - 1
+    back = alt ? 0 : clamp(back, 0, b.baseY)
+    if (op === 'cancel') {
+      if (this.sel !== null) {
+        this.clearSelect()
+        this.bump()
+      }
+      return { active: false, back, select: null }
+    }
+    if (op === 'start' || this.sel === null || this.sel.alt !== alt) {
+      this.clearSelect()
+      // Terminal のカーソルが見えていればそこから、さかのぼっていれば窓の最後の行から
+      const top = b.baseY - back
+      const cursorRow = b.baseY + b.cursorY
+      const y = cursorRow >= top && cursorRow < top + this.rows ? cursorRow : top + this.rows - 1
+      this.sel = { cur: this.pin(this.clampX(y === cursorRow ? b.cursorX : 0, y), y), anchor: null, line: false, alt }
+      this.bump()
+      return { active: true, back, select: this.selectInfo() }
+    }
+
+    const sel = this.sel
+    let x = sel.cur.x
+    let y = this.rowOf(sel.cur)
+    const page = Math.max(1, this.rows - 1)
+    switch (op) {
+      case 'left':
+        x -= 1
+        break
+      case 'right':
+        x += this.rowCells(y)[x + 1] === '' ? 2 : 1
+        break
+      case 'up':
+        y -= 1
+        break
+      case 'down':
+        y += 1
+        break
+      case 'home':
+        x = 0
+        break
+      case 'end':
+        x = this.cols
+        break
+      case 'top':
+        y = 0
+        x = 0
+        break
+      case 'bottom':
+        y = last
+        x = 0
+        break
+      case 'pageUp':
+        y -= page
+        break
+      case 'pageDown':
+        y += page
+        break
+      case 'word': {
+        let classes = this.rowClasses(y)
+        const here = classes[x] ?? 0
+        let i = x
+        if (here !== 0) while (i < this.cols && classes[i] === here) i++
+        while (i < this.cols && classes[i] === 0) i++
+        if (i < this.cols) {
+          x = i
+          break
+        }
+        // 行末まで来たら、次に文字のある行の先頭の単語へ
+        x = this.cols
+        for (let next = y + 1; next <= last; next++) {
+          classes = this.rowClasses(next)
+          const first = classes.findIndex(c => c !== 0)
+          if (first >= 0) {
+            y = next
+            x = first
+            break
+          }
+        }
+        break
+      }
+      case 'wordBack': {
+        let classes = this.rowClasses(y)
+        let i = x - 1
+        while (i >= 0 && classes[i] === 0) i--
+        // 行頭まで来たら、前に文字のある行の最後の単語へ
+        for (let prev = y - 1; i < 0 && prev >= 0; prev--) {
+          classes = this.rowClasses(prev)
+          i = classes.length - 1
+          while (i >= 0 && classes[i] === 0) i--
+          if (i >= 0) y = prev
+        }
+        if (i < 0) {
+          x = 0
+          break
+        }
+        while (i > 0 && classes[i - 1] === classes[i]) i--
+        x = i
+        break
+      }
+      case 'anchor':
+        if (sel.anchor !== null && !sel.line) {
+          sel.anchor.m?.dispose()
+          sel.anchor = null
+        } else {
+          sel.anchor ??= this.pin(x, y)
+          sel.line = false
+        }
+        break
+      case 'line':
+        if (sel.anchor !== null && sel.line) {
+          sel.anchor.m?.dispose()
+          sel.anchor = null
+          sel.line = false
+        } else {
+          sel.anchor ??= this.pin(x, y)
+          sel.line = true
+        }
+        break
+    }
+    y = clamp(y, 0, last)
+    x = this.clampX(x, y)
+    sel.cur.m?.dispose()
+    sel.cur = this.pin(x, y)
+
+    if (!alt) {
+      const top = b.baseY - back
+      if (y < top) back = b.baseY - y
+      else if (y > top + this.rows - 1) back = b.baseY - (y - this.rows + 1)
+      back = clamp(back, 0, b.baseY)
+    }
+    this.bump()
+    return { active: true, back, select: this.selectInfo() }
+  }
+
+  // 選択範囲(セル、両端を含む)。始点を置いていなければ null
+  private selectRange(): { y1: number; x1: number; y2: number; x2: number } | null {
+    const sel = this.sel
+    if (sel === null || sel.anchor === null) return null
+    const a = { x: sel.anchor.x, y: this.rowOf(sel.anchor) }
+    const c = { x: sel.cur.x, y: this.rowOf(sel.cur) }
+    const [from, to] = a.y < c.y || (a.y === c.y && a.x <= c.x) ? [a, c] : [c, a]
+    if (sel.line) return { y1: from.y, x1: 0, y2: to.y, x2: this.cols - 1 }
+    // 終点が全角文字なら、2 セル目まで含める
+    const x2 = this.rowCells(to.y)[to.x + 1] === '' ? to.x + 1 : to.x
+    return { y1: from.y, x1: from.x, y2: to.y, x2 }
+  }
+
+  // 選択範囲のテキスト。折り返された行はつなぎ、行末の空白は落とす。
+  // 選択モードでなければ null、始点を置いていなければ空文字列
+  selectionText(): string | null {
+    if (this.sel === null) return null
+    const r = this.selectRange()
+    if (r === null) return ''
+    const b = this.term.buffer.active
+    let out = ''
+    for (let y = r.y1; y <= r.y2; y++) {
+      const row = b.getLine(y)?.translateToString(true, y === r.y1 ? r.x1 : 0, y === r.y2 ? r.x2 + 1 : this.cols) ?? ''
+      // 次の行へ折り返していれば、そのままつなぐ
+      if (y < r.y2 && b.getLine(y + 1)?.isWrapped === true) out += row
+      // vim などは行末まで空白を書く。translateToString が落とすのは、書かれていないセルだけ
+      else out += row.trimEnd() + (y < r.y2 ? '\n' : '')
+    }
+    return out
+  }
+
+  private selectInfo(): SelectInfo | null {
+    if (this.sel === null) return null
+    const text = this.selectionText() ?? ''
+    return this.sel.anchor === null
+      ? { anchored: false, lines: 0, chars: 0 }
+      : { anchored: true, lines: text.split('\n').length, chars: text.length }
   }
 
   // シェルの現在の cwd(Linux)。取れなければ null
@@ -200,18 +451,31 @@ export class Session {
       history,
       back,
     }
+    // 画面が切り替わったら(vi の起動・終了)、選択していた位置は意味を失う
+    if (this.sel !== null && this.sel.alt !== alt) this.clearSelect()
+    const select = this.selectInfo()
+    if (select !== null) frame.select = select
     if (!withLines) return frame
     const top = b.baseY - back
-    const cursorRow = cursorVisible && this.alive ? b.baseY + b.cursorY : -1
+    // 選択モードの間は、Terminal のカーソルの代わりに選択カーソルを出す
+    const cursorRow = cursorVisible && this.alive && this.sel === null ? b.baseY + b.cursorY : -1
+    const range = this.selectRange()
+    const selRow = this.sel === null ? -1 : this.rowOf(this.sel.cur)
     const lines: Run[][] = []
-    for (let y = 0; y < this.rows; y++) {
-      lines.push(this.encodeLine(top + y, top + y === cursorRow ? frame.cx : -1))
+    for (let i = 0; i < this.rows; i++) {
+      const y = top + i
+      const hl: Highlight = { from: -1, to: -1, cur: y === selRow ? (this.sel?.cur.x ?? -1) : -1 }
+      if (range !== null && y >= range.y1 && y <= range.y2) {
+        hl.from = y === range.y1 ? range.x1 : 0
+        hl.to = y === range.y2 ? range.x2 : this.cols - 1
+      }
+      lines.push(this.encodeLine(y, y === cursorRow ? frame.cx : -1, hl))
     }
     frame.lines = lines
     return frame
   }
 
-  private encodeLine(y: number, cursorX: number): Run[] {
+  private encodeLine(y: number, cursorX: number, hl: Highlight): Run[] {
     const line = this.term.buffer.active.getLine(y)
     const runs: Run[] = []
     if (line === undefined) return runs
@@ -227,8 +491,8 @@ export class Session {
       if (text === '' || c.isInvisible()) text = width === 2 ? '  ' : ' '
       // 制御文字を含む文字列は、Mod の描画ツリーごと拒否される
       else if (CONTROL.test(text)) text = text.replace(CONTROL_ALL, ' ')
-      const fg: Color = c.isFgDefault() ? null : c.isFgRGB() ? hex(c.getFgColor()) : paletteColor(c.getFgColor())
-      const bg: Color = c.isBgDefault() ? null : c.isBgRGB() ? hex(c.getBgColor()) : paletteColor(c.getBgColor())
+      let fg: Color = c.isFgDefault() ? null : c.isFgRGB() ? hex(c.getFgColor()) : paletteColor(c.getFgColor())
+      let bg: Color = c.isBgDefault() ? null : c.isBgRGB() ? hex(c.getBgColor()) : paletteColor(c.getBgColor())
       let attrs = 0
       if (c.isBold()) attrs |= ATTR_BOLD
       if (c.isDim()) attrs |= ATTR_DIM
@@ -238,6 +502,12 @@ export class Session {
       if (c.isInverse()) attrs |= ATTR_INVERSE
       // カーソルが全角文字の 2 セル目にあるときも、その文字を反転する
       if (cursorX === x || (width === 2 && cursorX === x + 1)) attrs ^= ATTR_INVERSE
+      if (x >= hl.from && x <= hl.to) attrs ^= ATTR_INVERSE
+      if (x === hl.cur) {
+        fg = SELECT_CURSOR_FG
+        bg = SELECT_CURSOR_BG
+        attrs &= ~(ATTR_INVERSE | ATTR_DIM)
+      }
       if (last !== undefined && last[1] === fg && last[2] === bg && last[3] === attrs) {
         last[0] += text
       } else {

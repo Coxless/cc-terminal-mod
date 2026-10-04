@@ -1,6 +1,8 @@
 // Client の onKey で受けたキーを、PTY に書くバイト列へ変換する純関数。
 // 届くキーと届かないキーの根拠は docs/architecture.md §2。
 
+import type { SelectOp } from './protocol'
+
 export type KeyEvent = { key: string; ctrl?: true; shift?: true; meta?: true }
 export type KeyModes = { appCursor: boolean }
 
@@ -8,7 +10,19 @@ export type KeyModes = { appCursor: boolean }
 //   ctrl+] → Escape、alt+c / alt+d / alt+z / alt+x → Ctrl+C / D / Z / X
 const ALT_REMAP: Record<string, string> = { c: '\x03', d: '\x04', z: '\x1a', x: '\x18' }
 
-export const KEY_HINT = 'ctrl+] = Esc · alt+c/d/z/x = ^C/^D/^Z/^X'
+// ペインに出すヘルプ(alt+h と [ Help ] ボタン)。キーの割り当てを変えたら、ここも直す
+export const HELP_LINES = [
+  'TERMINAL HELP · any key closes',
+  'Type: click [ Terminal input ] · esc: back to Claude',
+  '  ctrl+]              Esc',
+  '  alt+c / d / z / x   Ctrl+C / D / Z / X',
+  '  shift+PgUp / PgDn   history (or the wheel)',
+  '  alt+h               this help',
+  'Give text to Claude',
+  '  alt+v               select: hjkl/arrows, v, V, enter, q',
+  '  alt+a               add the mouse selection (/term-add)',
+  'Paste is not supported: it goes to the Claude prompt',
+]
 
 // CSI <letter> 形式のキー。DECCKM のときは SS3 になる
 const CURSOR: Record<string, string> = { up: 'A', down: 'B', right: 'C', left: 'D', home: 'H', end: 'F' }
@@ -88,4 +102,68 @@ export function scrollKey(k: KeyEvent): 'up' | 'down' | undefined {
   if (k.key === 'pageup') return 'up'
   if (k.key === 'pagedown') return 'down'
   return undefined
+}
+
+// 選択モード(キーボードでの選択)に入るキー。PTY には送らない
+export const isSelectStart = (k: KeyEvent): boolean => k.meta === true && !k.ctrl && k.key === 'v'
+// マウスで選択したテキストを Claude に渡すキー(/term-add と同じ)。PTY には送らない
+export const isAddKey = (k: KeyEvent): boolean => k.meta === true && !k.ctrl && k.key === 'a'
+
+// ヘルプを出すキー。PTY には送らない
+export const isHelpKey = (k: KeyEvent): boolean => k.meta === true && !k.ctrl && k.key === 'h'
+
+// 選択モードの間のキー。'send' は「選択を Claude に渡して、モードを出る」
+export type SelectAction = SelectOp | 'send'
+
+const SELECT_NAMED: Record<string, SelectAction> = {
+  left: 'left',
+  right: 'right',
+  up: 'up',
+  down: 'down',
+  home: 'home',
+  end: 'end',
+  pageup: 'pageUp',
+  pagedown: 'pageDown',
+  return: 'send',
+  enter: 'send',
+  space: 'anchor',
+}
+// 名前で届くキーのうち、選択モードで使わないもの(文字の並びとして読まない)
+const SELECT_IGNORED = /^(tab|backspace|delete|escape|insert|f\d+)$/
+// vi 風の割り当て
+const SELECT_CHAR: Record<string, SelectAction> = {
+  h: 'left',
+  j: 'down',
+  k: 'up',
+  l: 'right',
+  '0': 'home',
+  $: 'end',
+  w: 'word',
+  b: 'wordBack',
+  g: 'top',
+  G: 'bottom',
+  v: 'anchor',
+  ' ': 'anchor',
+  V: 'line',
+  q: 'cancel',
+  '\r': 'send',
+}
+
+// 選択モードの間に届いたキーを操作に変える。割り当ての無いキーは捨てる(PTY には送らない)
+export function selectActions(k: KeyEvent): SelectAction[] {
+  if (k.ctrl) return !k.meta && k.key === ']' ? ['cancel'] : []
+  const named = SELECT_NAMED[k.key]
+  if (named !== undefined) {
+    // alt+b / alt+f は left / right + meta として届く
+    if (k.meta) return named === 'left' ? ['wordBack'] : named === 'right' ? ['word'] : []
+    return [named]
+  }
+  if (k.meta || k.key.startsWith('\x1b') || SELECT_IGNORED.test(k.key)) return []
+  const actions: SelectAction[] = []
+  // まとめて届いた複数文字は、1 文字ずつ
+  for (const ch of k.key) {
+    const action = SELECT_CHAR[k.shift && ch.length === 1 ? ch.toUpperCase() : ch]
+    if (action !== undefined) actions.push(action)
+  }
+  return actions
 }

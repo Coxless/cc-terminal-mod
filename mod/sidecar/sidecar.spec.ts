@@ -3,7 +3,16 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ATTR_BOLD, ATTR_INVERSE, type Frame, type Info, type StartResult } from '../shared/protocol'
+import {
+  ATTR_BOLD,
+  ATTR_INVERSE,
+  type Frame,
+  type Info,
+  type SelectOp,
+  type SelectResponse,
+  type SelectionResponse,
+  type StartResult,
+} from '../shared/protocol'
 
 const MAIN = join(import.meta.dir, 'main.ts')
 const home = mkdtempSync(join(tmpdir(), 'cc-term-test-'))
@@ -30,6 +39,16 @@ const api = async <T>(name: string, path: string, body?: unknown): Promise<T> =>
 const text = (f: Frame) => (f.lines ?? []).map(l => l.map(r => r[0]).join(''))
 const send = (name: string, d: string) => api(name, '/input', { d })
 const snapshot = (name: string, back = 0) => api<Frame>(name, `/frame?since=0&wait=0&back=${back}`)
+const select = async (name: string, ops: SelectOp[], back = 0) => {
+  let last: SelectResponse = { ok: false, error: 'no op' }
+  for (const op of ops) {
+    last = await api<SelectResponse>(name, '/select', { op, back })
+    if (!last.ok) throw new Error(last.error)
+    back = last.back
+  }
+  return last as Extract<SelectResponse, { ok: true }>
+}
+const selection = async (name: string) => (await api<SelectionResponse>(name, '/selection')).text
 
 async function until(name: string, test: string | ((f: Frame, lines: string[]) => boolean), ms = 10000) {
   const t0 = Date.now()
@@ -178,6 +197,102 @@ describe('sidecar', () => {
     const top = await snapshot(S, 10 ** 9)
     expect(top.back).toBe(top.history)
   }, 70000)
+
+  test('選択モード: キーボードの操作だけで範囲を選び、テキストを取れる', async () => {
+    await send(S, "clear; printf 'alpha beta-gamma\\n日本語 テスト\\n'\n")
+    const f0 = await until(S, (_f, l) => l.includes('日本語 テスト'))
+    const row = text(f0).indexOf('alpha beta-gamma')
+    expect(await selection(S)).toBeNull()
+
+    // Terminal のカーソルの位置から始まる。始点を置くまでは何も選んでいない
+    const started = await select(S, ['start'])
+    expect(started.active).toBe(true)
+    expect(started.select).toEqual({ anchored: false, lines: 0, chars: 0 })
+    expect(await selection(S)).toBe('')
+    const f1 = await snapshot(S)
+    expect(f1.select).toEqual({ anchored: false, lines: 0, chars: 0 })
+    expect(f1.lines![f0.cy]!.some(r => r[2] === 3)).toBe(true) // 選択カーソル
+
+    // 全角は 1 文字ずつ動き、終点の文字を含む
+    await select(S, ['up', 'home', 'anchor', 'right', 'right'])
+    expect(await selection(S)).toBe('日本語')
+    await select(S, ['end'])
+    expect(await selection(S)).toBe('日本語 テスト')
+
+    // 行単位。行末の空白は入らない
+    const lines = await select(S, ['line', 'up'])
+    expect(await selection(S)).toBe('alpha beta-gamma\n日本語 テスト')
+    expect(lines.select).toEqual({ anchored: true, lines: 2, chars: 'alpha beta-gamma\n日本語 テスト'.length })
+    const f2 = await snapshot(S)
+    expect(f2.lines![row]!.some(r => (r[3] & ATTR_INVERSE) !== 0)).toBe(true)
+    expect(f2.lines![row + 1]!.every(r => (r[3] & ATTR_INVERSE) !== 0)).toBe(true)
+
+    // 単語単位の移動
+    await select(S, ['start', 'up', 'up', 'home', 'anchor', 'word'])
+    expect(await selection(S)).toBe('alpha b')
+    await select(S, ['word'])
+    expect(await selection(S)).toBe('alpha beta-')
+    await select(S, ['wordBack', 'wordBack'])
+    expect(await selection(S)).toBe('a')
+    await select(S, ['word', 'word', 'word', 'word'])
+    expect(await selection(S)).toBe('alpha beta-gamma\n日')
+
+    // 取り消すと、ハイライトも消える
+    expect((await select(S, ['cancel'])).active).toBe(false)
+    expect(await selection(S)).toBeNull()
+    const f3 = await snapshot(S)
+    expect(f3.select).toBeUndefined()
+    expect(f3.lines).toEqual(f0.lines)
+    expect(((await api(S, '/select', { op: 'nope' })) as any).ok).toBe(false)
+  })
+
+  test('選択モード: 折り返された行はつなぎ、出力が増えても位置がずれない', async () => {
+    const { cols, rows } = await snapshot(S)
+    const long = 'x'.repeat(cols + 20)
+    await send(S, `clear; echo ${long}; echo AFTER\n`)
+    await until(S, (_f, l) => l.includes('AFTER'))
+    await select(S, ['start', 'up', 'up', 'up', 'line', 'down'])
+    expect(await selection(S)).toBe(long)
+
+    // 行末まで書かれた空白は落とす
+    await select(S, ['cancel'])
+    await send(S, "clear; printf 'pad   \\nnext  \\n'\n")
+    await until(S, (_f, l) => l.includes('next'))
+    await select(S, ['start', 'up', 'up', 'line', 'down'])
+    expect(await selection(S)).toBe('pad\nnext')
+    await select(S, ['cancel'])
+    await send(S, `clear; echo ${long}; echo AFTER\n`)
+    await until(S, (_f, l) => l.includes('AFTER') && l[0]!.startsWith('x'))
+    await select(S, ['start', 'up', 'up', 'up', 'line', 'down'])
+
+    // 選択したまま出力を流す。選んだ行は履歴に入るが、取れるテキストは変わらない
+    await send(S, 'seq 1 200; echo FLOOD-$((1+1))\n')
+    const f = await until(S, (_f, l) => l.includes('FLOOD-2'))
+    expect(f.select).toEqual({ anchored: true, lines: 1, chars: long.length })
+    expect(await selection(S)).toBe(long)
+
+    // 窓の外の選択カーソルを動かすと、見える位置まで窓が動く
+    const moved = await select(S, ['up'])
+    expect(moved.back).toBeGreaterThan(0)
+    const view = await snapshot(S, moved.back)
+    expect(text(view)[0]).toStartWith('x')
+    // 末尾へ飛ぶと窓も戻る
+    expect((await select(S, ['bottom'], moved.back)).back).toBe(0)
+    expect((await select(S, ['pageUp'], 0)).back).toBe(0)
+    expect((await select(S, ['pageUp'], 0)).back).toBe(rows - 1)
+    await select(S, ['cancel'])
+  })
+
+  test('選択モード: vi の画面でも選べ、画面が切り替わると終わる', async () => {
+    await send(S, `clear; printf 'one\\ntwo\\nthree\\n' > ${home}/sel.txt; vi ${home}/sel.txt\n`)
+    await until(S, (f, l) => f.alt && l.includes('three'))
+    await select(S, ['start', 'top', 'down', 'line', 'down'])
+    expect(await selection(S)).toBe('two\nthree')
+    await send(S, ':q!\n')
+    const back = await until(S, f => !f.alt)
+    expect(back.select).toBeUndefined()
+    expect(await selection(S)).toBeNull()
+  })
 
   test('変化が無ければ lines を省く', async () => {
     const f = await snapshot(S)

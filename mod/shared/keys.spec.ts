@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { keyToBytes, scrollKey } from './keys'
+import { isAddKey, isSelectStart, keyToBytes, scrollKey, selectActions } from './keys'
 
 test('文字と基本のキー', () => {
   expect(keyToBytes({ key: 'a' })).toBe('a')
@@ -81,4 +81,47 @@ test('履歴のスクロールキー', () => {
   expect(scrollKey({ key: 'pageup', shift: true })).toBe('up')
   expect(scrollKey({ key: 'pagedown', shift: true })).toBe('down')
   expect(scrollKey({ key: 'pageup' })).toBeUndefined()
+})
+
+test('選択モードに入るキーと、追加のキー', () => {
+  expect(isSelectStart({ key: 'v', meta: true })).toBe(true)
+  expect(isSelectStart({ key: 'v' })).toBe(false)
+  expect(isSelectStart({ key: 'v', meta: true, ctrl: true })).toBe(false)
+  expect(isAddKey({ key: 'a', meta: true })).toBe(true)
+  expect(isAddKey({ key: 'a' })).toBe(false)
+})
+
+test('選択モードの間のキー', () => {
+  expect(selectActions({ key: 'h' })).toEqual(['left'])
+  expect(selectActions({ key: 'j' })).toEqual(['down'])
+  expect(selectActions({ key: 'k' })).toEqual(['up'])
+  expect(selectActions({ key: 'l' })).toEqual(['right'])
+  expect(selectActions({ key: 'up' })).toEqual(['up'])
+  expect(selectActions({ key: '0' })).toEqual(['home'])
+  expect(selectActions({ key: '$', shift: true })).toEqual(['end'])
+  expect(selectActions({ key: 'end' })).toEqual(['end'])
+  expect(selectActions({ key: 'w' })).toEqual(['word'])
+  expect(selectActions({ key: 'b' })).toEqual(['wordBack'])
+  // alt+b / alt+f は left / right + meta として届く
+  expect(selectActions({ key: 'left', meta: true })).toEqual(['wordBack'])
+  expect(selectActions({ key: 'right', meta: true })).toEqual(['word'])
+  expect(selectActions({ key: 'g' })).toEqual(['top'])
+  expect(selectActions({ key: 'G', shift: true })).toEqual(['bottom'])
+  expect(selectActions({ key: 'g', shift: true })).toEqual(['bottom'])
+  expect(selectActions({ key: 'pageup' })).toEqual(['pageUp'])
+  expect(selectActions({ key: 'v' })).toEqual(['anchor'])
+  expect(selectActions({ key: 'space' })).toEqual(['anchor'])
+  expect(selectActions({ key: 'V', shift: true })).toEqual(['line'])
+  expect(selectActions({ key: 'return' })).toEqual(['send'])
+  expect(selectActions({ key: 'q' })).toEqual(['cancel'])
+  expect(selectActions({ key: ']', ctrl: true })).toEqual(['cancel'])
+})
+
+test('選択モード: まとめて届いた文字は 1 文字ずつ、割り当ての無いキーは捨てる', () => {
+  expect(selectActions({ key: 'Vjj' })).toEqual(['line', 'down', 'down'])
+  expect(selectActions({ key: 'x' })).toEqual([])
+  expect(selectActions({ key: 'c', meta: true })).toEqual([])
+  expect(selectActions({ key: 'a', ctrl: true })).toEqual([])
+  expect(selectActions({ key: '\x1b[2~' })).toEqual([])
+  expect(selectActions({ key: 'tab' })).toEqual([])
 })

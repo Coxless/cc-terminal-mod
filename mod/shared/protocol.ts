@@ -1,7 +1,7 @@
 // hooks モジュールと sidecar が共有する、Unix ソケット上の HTTP の型。
 // ここには $ にも Bun にも触れないものだけを置く。
 
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 // 色: null = 端末の既定色、0〜15 = ANSI パレットの番号、文字列 = '#rrggbb'
 export type Color = number | string | null
@@ -38,6 +38,8 @@ export type Frame = {
   history: number
   // 末尾から何行さかのぼった位置を返しているか
   back: number
+  // 選択モード(キーボードでの選択)の間だけある。選択範囲とカーソルは `lines` に色として含まれる
+  select?: SelectInfo
   // `since` から変化が無いときは省かれる。行ごとの Run の並び(行末の空白は省く)
   lines?: Run[][]
 }
@@ -65,6 +67,42 @@ export type Info = {
 export type InputRequest = { d: string }
 // POST /resize
 export type ResizeRequest = { cols: number; rows: number }
+
+// 選択モードの操作。位置と範囲は sidecar が持つ
+export const SELECT_OPS = [
+  'start',
+  'cancel',
+  'left',
+  'right',
+  'up',
+  'down',
+  'home',
+  'end',
+  'word',
+  'wordBack',
+  'top',
+  'bottom',
+  'pageUp',
+  'pageDown',
+  // 始点を置く(文字単位)。もう一度で外す
+  'anchor',
+  // 行単位の選択。もう一度で外す
+  'line',
+] as const
+export type SelectOp = (typeof SELECT_OPS)[number]
+
+// 選択範囲の大きさ。始点を置くまでは anchored が false で、lines も chars も 0
+export type SelectInfo = { anchored: boolean; lines: number; chars: number }
+
+// POST /select。`back` は、いま表示している位置
+export type SelectRequest = { op: SelectOp; back?: number }
+// `back` は、選択カーソルが見えるように動かした後の位置
+export type SelectResponse =
+  { ok: true; active: boolean; back: number; select: SelectInfo | null } | { ok: false; error: string }
+
+// GET /selection。選択モードでなければ null、始点を置いていなければ空文字列
+export type SelectionResponse = { text: string | null }
+
 // POST /kill のボディは空
 export type OkResponse = { ok: true } | { ok: false; error: string }
 

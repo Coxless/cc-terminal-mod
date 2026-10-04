@@ -20,7 +20,11 @@ type World = {
   requests: { path: string; method: string; body: string; socketPath?: string }[]
   appended: string[]
   toasts: string[]
+  logs: string[]
   opened: string[]
+  // 選択モード(sidecar が持つ状態)と、その範囲のテキスト
+  selecting: boolean
+  selectedText: string
   selection: { text: string; requestId?: string } | undefined
   startResult: string
   shellCwd: string | null
@@ -60,7 +64,10 @@ function world(on: On): World {
     requests: [],
     appended: [],
     toasts: [],
+    logs: [],
     opened: [],
+    selecting: false,
+    selectedText: '',
     selection: undefined,
     startResult: JSON.stringify({ ok: true, already: false, pid: 100, shellPid: 101 }),
     shellCwd: '/tmp',
@@ -91,7 +98,16 @@ function world(on: On): World {
       if (Number(url.searchParams.get('since')) < 5) return json(frame())
       return json(await new Promise<Frame>(resolve => waiting.push(resolve)))
     }
+    if (url.pathname === '/select') {
+      w.selecting = JSON.parse(e.init?.body ?? '{}').op !== 'cancel'
+      return json({ ok: true, active: w.selecting, back: 0, select: null })
+    }
+    if (url.pathname === '/selection') return json({ text: w.selecting ? w.selectedText : null })
     return json({ ok: true })
+  })
+  on('ui.log', (_$, e) => {
+    w.logs.push(e.text)
+    return { value: undefined }
   })
   on('ui.open', (_$, e) => {
     w.opened.push(e.id)
@@ -130,7 +146,7 @@ const inputs = (w: World) => w.requests.filter(r => r.path === '/input').map(r =
 test('/term は Claude Code の PID から作ったソケットで sidecar を起動し、ペインを開く', async ($, on) => {
   const w = world(on)
   await start($)
-  expect(await command($, 'term')).toBe('Terminal opened.')
+  expect(await command($, 'term')).toMatch(/^Terminal opened\./)
   const argv = w.runs.find(a => a.includes('start')) ?? []
   expect(argv[0]).toMatch(/\/bin\/terminal-sidecar$/)
   expect(argv.slice(argv.indexOf('--sock'), argv.indexOf('--sock') + 2)).toEqual(['--sock', SOCK])
@@ -183,6 +199,35 @@ test('画面を Text 行で描き、キーを順に PTY へ送る', async ($, on
   w.release()
 })
 
+test('ヘルプ: alt+h と [ Help ] で出し、次のキーで閉じる。そのキーは PTY には送らない', async ($, on) => {
+  const w = world(on)
+  await start($)
+  await command($, 'term')
+  const ui = await $.ui.mount({
+    plugin: 'terminal',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'terminal',
+    props: PANE_PROPS,
+  })
+  await w.clock.advance(50)
+  expect(await ui.find({ type: 'Text', text: /TERMINAL HELP/ })).toBeUndefined()
+  await ui.key({ key: 'h', meta: true, in: 'keys' })
+  expect(await ui.find({ type: 'Text', text: /TERMINAL HELP/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /hello 日本語/ })).toBeUndefined()
+  await ui.key({ key: 'x', in: 'keys' })
+  expect(await ui.find({ type: 'Text', text: /TERMINAL HELP/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /hello 日本語/ })).toBeDefined()
+  await ui.press({ key: 'help' })
+  expect(await ui.find({ type: 'Text', text: /TERMINAL HELP/ })).toBeDefined()
+  await ui.press({ key: 'help' })
+  expect(await ui.find({ type: 'Text', text: /TERMINAL HELP/ })).toBeUndefined()
+  await w.clock.advance(400)
+  expect(inputs(w).join('')).toBe('')
+  await ui.unmount()
+  w.release()
+})
+
 test('/term-add: 追加に失敗したら、理由と再実行の方法を伝え、成功の表示は出さない', async ($, on) => {
   const w = world(on)
   await start($)
@@ -208,6 +253,67 @@ test('/term-add: 選択が無い、または Terminal の外なら何も渡さ�
   w.selection = undefined
   expect(await command($, 'term-add')).toMatch(/^Nothing is selected/)
   expect(w.appended).toEqual([])
+  w.release()
+})
+
+test('選択モード: キーは PTY に送らず選択の操作になり、取り消すと入力に戻る', async ($, on) => {
+  const w = world(on)
+  await start($)
+  await command($, 'term')
+  const ui = await $.ui.mount({
+    plugin: 'terminal',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'terminal',
+    props: PANE_PROPS,
+  })
+  await w.clock.advance(50)
+  await ui.key({ key: 'a', in: 'keys' })
+  await ui.key({ key: 'v', meta: true, in: 'keys' })
+  await ui.key({ key: 'k', in: 'keys' })
+  await ui.key({ key: 'V', shift: true, in: 'keys' })
+  await ui.key({ key: 'x', in: 'keys' })
+  await ui.key({ key: 'q', in: 'keys' })
+  await ui.key({ key: 'b', in: 'keys' })
+  await w.clock.advance(400)
+  const ops = w.requests.filter(r => r.path === '/select').map(r => JSON.parse(r.body).op)
+  expect(ops).toEqual(['start', 'up', 'line', 'cancel'])
+  expect(inputs(w).join('')).toBe('ab')
+  // 範囲を動かしただけでは、何も Claude に渡らない
+  expect(w.appended).toEqual([])
+  expect(w.requests.some(r => r.path === '/selection')).toBe(false)
+  await ui.unmount()
+  w.release()
+})
+
+test('選択モード: enter で渡す。何も選んでいなければ渡さず、失敗したら理由を伝える', async ($, on) => {
+  const w = world(on)
+  await start($)
+  await command($, 'term')
+  const ui = await $.ui.mount({
+    plugin: 'terminal',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'terminal',
+    props: PANE_PROPS,
+  })
+  await w.clock.advance(50)
+  await ui.key({ key: 'v', meta: true, in: 'keys' })
+  await ui.key({ key: 'return', in: 'keys' })
+  await w.clock.advance(400)
+  expect(w.toasts).toEqual(['Nothing is selected. Press v (or V for whole lines), move, then press enter.'])
+  expect(w.selecting).toBe(true)
+
+  w.selectedText = 'Expected: 200\nReceived: 500'
+  await ui.key({ key: 'return', in: 'keys' })
+  await w.clock.advance(400)
+  // このテストキットでは追加が失敗する(上の session.append の注)。失敗の表示を確かめる
+  expect(w.toasts[1]).toMatch(/^Failed to add selection to Claude Context: /)
+  expect(w.logs).toEqual([])
+  // 失敗したら選択を残す(やり直せるように)。enter は PTY に送らない
+  expect(w.selecting).toBe(true)
+  expect(inputs(w)).toEqual([])
+  await ui.unmount()
   w.release()
 })
 

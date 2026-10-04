@@ -2,8 +2,17 @@
 // PTY と画面の状態は sidecar が持つ。ここは sidecar の起動、long-poll、描画、キーの中継だけを行う。
 // 制約の根拠は docs/architecture.md。
 import type { EngineInterface, Register, Timer } from 'claude-code'
-import { KEY_HINT, keyToBytes, scrollKey, type KeyEvent } from '../shared/keys'
-import { buildPayload, isEmptySelection, pasteBytes } from '../shared/payload'
+import {
+  HELP_LINES,
+  isAddKey,
+  isHelpKey,
+  isSelectStart,
+  keyToBytes,
+  scrollKey,
+  selectActions,
+  type KeyEvent,
+} from '../shared/keys'
+import { buildPayload, isEmptySelection, summarize } from '../shared/payload'
 import {
   ATTR_BOLD,
   ATTR_DIM,
@@ -15,6 +24,9 @@ import {
   type Frame,
   type Info,
   type Run,
+  type SelectOp,
+  type SelectResponse,
+  type SelectionResponse,
   type StartResult,
 } from '../shared/protocol'
 
@@ -26,7 +38,21 @@ type Ops = {
   invalidate: () => void
   after: (ms: number, fn: () => void) => Timer
   pluginRoot: string
+  // キーから始まる「Claude に渡す」操作が使う
+  selection: AddIo['selection']
+  append: AddIo['append']
+  toast: AddIo['toast']
+  log: AddIo['log']
 }
+
+// sidecar へ順に送る操作。キーの順序を保つため、PTY への書き込みと同じ 1 本のループで処理する
+type Job =
+  | { input: string }
+  | { select: SelectOp }
+  // 選択モードの範囲を Claude に渡す
+  | { send: true }
+  // マウスで選択したテキストを Claude に渡す
+  | { add: true }
 
 type Conn =
   | { kind: 'init' } // session.start がまだ終わっていない
@@ -42,6 +68,8 @@ type AddIo = {
   selection: () => Promise<{ text: string; requestId?: string } | undefined>
   append: (text: string) => Promise<{ deny?: string }>
   toast: (text: string) => void
+  // トランスクリプトに 1 行出す(Claude には渡らない)
+  log: (text: string) => void
   isFullscreen: boolean | undefined
 }
 
@@ -51,8 +79,8 @@ const POLL_WAIT_MS = 20000
 const RESIZE_DEBOUNCE_MS = 120
 // inline(プロンプトの上)に置かれたときに頼む行数。実際の高さはレイアウトが決める
 const INLINE_ROWS = 16
-// 画面の上下に置く行(キー入力の帯と、状態の行)
-const CHROME_ROWS = 2
+// 画面の下に置く行(入力の入り口、ボタン、状態)
+const CHROME_ROWS = 1
 const MIN_COLS = 20
 const MAX_COLS = 200
 const MIN_ROWS = 3
@@ -101,8 +129,34 @@ export const register: Register = on => {
 
   let keysId = ''
   let lastKey = 0
-  let pending = ''
+  let jobs: Job[] = []
   let sending = false
+  // 選択モード。位置と範囲は sidecar が持つ。ここは、キーをどちらへ送るかを決めるためだけに覚える
+  let selecting = false
+  // Client(下の行の [ Terminal input ])がキーを受けていると分かっているか。フォーカスを得た・失ったを直接知る
+  // API は無いので、帯のクリックとキーで立て、キーが他へ行ったと分かったときに下ろす
+  let typing = false
+  // Terminal の行の代わりにヘルプを出しているか
+  let help = false
+
+  const keyProps = () => ({
+    ackId: keysId,
+    ack: lastKey,
+    typing,
+    mode: selecting ? 'select' : 'type',
+  })
+
+  const setHelp = (next: boolean) => {
+    if (help === next) return
+    help = next
+    ops?.invalidate()
+  }
+
+  const setTyping = (next: boolean) => {
+    if (typing === next) return
+    typing = next
+    ops?.invalidate()
+  }
 
   const api = async <T,>(path: string, body?: unknown): Promise<T> => {
     const res = await (ops as Ops).fetch(HOST + path, {
@@ -128,6 +182,8 @@ export const register: Register = on => {
     }
     frame = next
     lines = next.lines
+    // 送信待ちの操作があるときは、その結果のほうが新しい
+    if (jobs.length === 0 && !sending) selecting = next.select !== undefined
     ver = next.ver
     ops?.invalidate()
   }
@@ -168,30 +224,123 @@ export const register: Register = on => {
     ops?.after(0, refresh)
   }
 
+  // 渡すテキストを Context に追加し、渡した内容をトランスクリプトに出す。
+  // 渡すのは、人間が選択してこの操作をしたときだけ。中身は解釈しない。
+  const deliver = async (io: Omit<AddIo, 'selection' | 'isFullscreen'>, text: string): Promise<[boolean, string]> => {
+    const failed = (why: unknown): [boolean, string] => [
+      false,
+      `Failed to add selection to Claude Context: ${String(why)}. Run /term-add to retry.`,
+    ]
+    // シェルの実際の cwd。取れなければ Working directory の行を出さない
+    let cwdNow: string | null = null
+    try {
+      if (conn.kind === 'up') cwdNow = (await api<Info>('/info')).cwd
+    } catch {
+      // cwd なしで渡す
+    }
+    try {
+      const appended = await io.append(buildPayload(text, cwdNow))
+      if (appended.deny !== undefined) return failed(appended.deny)
+    } catch (error) {
+      return failed(error)
+    }
+    // $.ui.log は改行を出せないので、1 行にまとめる
+    io.log(summarize(text, cwdNow).join(' '))
+    const done = `Added ${text.length} characters to Claude Context`
+    io.toast(done)
+    return [true, `${done}.`]
+  }
+
+  // マウスで選択したテキストを Claude に渡す。戻り値は人に見せる結果の 1 行。
+  const addToClaude = async (io: AddIo): Promise<string> => {
+    let selected: { text: string; requestId?: string } | undefined
+    try {
+      selected = await io.selection()
+    } catch (error) {
+      return `Failed to add selection to Claude Context: ${String(error)}. Run /term-add to retry.`
+    }
+    if (selected === undefined && io.isFullscreen === false) {
+      return (
+        'Cannot read the selection: Claude Code is not in the fullscreen layout here (the default inside tmux), ' +
+        'and selections can only be read there. Try starting Claude Code with CLAUDE_CODE_NO_FLICKER=1, ' +
+        'or select with the keyboard (alt+v in the terminal pane).'
+      )
+    }
+    if (selected === undefined || isEmptySelection(selected.text)) {
+      return 'Nothing is selected. Drag over text in the terminal pane (or press alt+v there), then run /term-add.'
+    }
+    if (selected.requestId !== undefined) {
+      return 'The selection is in the conversation, not in the terminal pane. Nothing was added.'
+    }
+    return (await deliver(io, selected.text))[1]
+  }
+
+  const runSelect = async (op: SelectOp) => {
+    const r = await api<SelectResponse>('/select', { op, back })
+    if (!r.ok) {
+      // 古い sidecar が動いている(Mod を更新した後など)
+      selecting = false
+      ops?.toast(`Keyboard selection is unavailable: ${r.error}. Exit the shell and run /term to restart it.`)
+      return
+    }
+    selecting = r.active
+    // 選択カーソルが窓の外へ出たら、sidecar が見える位置を返す
+    if (r.back !== back) {
+      back = r.back
+      refresh()
+    }
+  }
+
+  // 選択モードの範囲を Claude に渡して、モードを出る
+  const sendSelection = async (o: Ops) => {
+    const { text } = await api<SelectionResponse>('/selection')
+    if (text === null) {
+      selecting = false
+      return
+    }
+    if (isEmptySelection(text)) {
+      o.toast('Nothing is selected. Press v (or V for whole lines), move, then press enter.')
+      return
+    }
+    const [ok, result] = await deliver(o, text)
+    if (ok) await runSelect('cancel')
+    else o.toast(result)
+  }
+
   const pump = async () => {
-    if (sending) return
+    const o = ops
+    if (sending || o === undefined) return
     sending = true
     try {
-      while (pending !== '') {
-        const d = pending
-        pending = ''
-        await api('/input', { d })
+      for (let job = jobs.shift(); job !== undefined; job = jobs.shift()) {
+        if ('input' in job) await api('/input', { d: job.input })
+        else if ('select' in job) await runSelect(job.select)
+        else if ('send' in job) await sendSelection(o)
+        else o.toast(await addToClaude({ ...o, toast: () => undefined, isFullscreen: undefined }))
       }
     } catch (error) {
-      pending = ''
+      jobs = []
       lost(error)
     } finally {
       sending = false
+      o.invalidate()
     }
+  }
+
+  const enqueue = (job: Job) => {
+    if (conn.kind !== 'up') return
+    const last = jobs[jobs.length - 1]
+    if ('input' in job && last !== undefined && 'input' in last) last.input += job.input
+    else jobs.push(job)
+    // dispatch の中で始めた呼び出しは、その dispatch と一緒に中断されることがある
+    ops?.after(0, () => void pump())
   }
 
   const sendInput = (d: string) => {
     if (d === '' || conn.kind !== 'up') return
-    pending += d
     // 入力したら末尾へ戻る
     if (back !== 0) scrollTo(0)
-    // dispatch の中で始めた呼び出しは、その dispatch と一緒に中断されることがある
-    ops?.after(0, () => void pump())
+    enqueue({ input: d })
   }
 
   // sidecar を起動する(動いていればそれに繋ぐ)。失敗の理由は conn に残す
@@ -237,48 +386,6 @@ export const register: Register = on => {
     o.invalidate()
   }
 
-  // 選択テキストを Claude の Context に追加する。戻り値は人に見せる結果の 1 行。
-  // 渡すのは、人間が選択してこの操作をしたときだけ。中身は解釈しない。
-  const addToClaude = async (io: AddIo): Promise<string> => {
-    let selected: { text: string; requestId?: string } | undefined
-    try {
-      selected = await io.selection()
-    } catch (error) {
-      return `Failed to add selection to Claude Context: ${String(error)}. Run /term-add to retry.`
-    }
-    if (selected === undefined && io.isFullscreen === false) {
-      return (
-        'Cannot read the selection: Claude Code is not in the fullscreen layout here (the default inside tmux), ' +
-        'and selections can only be read there. Try starting Claude Code with CLAUDE_CODE_NO_FLICKER=1.'
-      )
-    }
-    if (selected === undefined || isEmptySelection(selected.text)) {
-      return 'Nothing is selected. Drag over text in the terminal pane, then run /term-add.'
-    }
-    if (selected.requestId !== undefined) {
-      return 'The selection is in the conversation, not in the terminal pane. Nothing was added.'
-    }
-    try {
-      // シェルの実際の cwd。取れなければ Working directory の行を出さない
-      const cwdNow =
-        conn.kind === 'up'
-          ? await api<Info>('/info').then(
-              i => i.cwd,
-              () => null,
-            )
-          : null
-      const appended = await io.append(buildPayload(selected.text, cwdNow))
-      if (appended.deny !== undefined) {
-        return `Failed to add selection to Claude Context: ${appended.deny}. Run /term-add to retry.`
-      }
-    } catch (error) {
-      return `Failed to add selection to Claude Context: ${String(error)}. Run /term-add to retry.`
-    }
-    const done = `Added ${selected.text.length} characters to Claude Context`
-    io.toast(done)
-    return `${done}.`
-  }
-
   const requestSize = (cols: number, rows: number) => {
     if (ops === undefined || (cols === want.cols && rows === want.rows)) return
     want = { cols, rows }
@@ -297,6 +404,10 @@ export const register: Register = on => {
       invalidate: () => $.ui.invalidate('ui.render'),
       after: (ms, fn) => $.clock.after(ms, fn),
       pluginRoot: $.plugin.root,
+      selection: () => $.ui.selection(),
+      append: payload => $.session.append({ message: { type: 'user', content: [{ type: 'text', text: payload }] } }),
+      toast: line => $.ui.toast(line),
+      log: line => $.ui.log(line),
     }
     cwd = e.cwd
     // ソケット名は Claude Code 本体の PID から作る。session id は /clear で変わり、
@@ -352,7 +463,11 @@ export const register: Register = on => {
     const opened = await $.ui.open({ id: PANE, title: 'Terminal', focus: true, rows: INLINE_ROWS + CHROME_ROWS })
     if (conn.kind === 'failed') return { text: `Failed to start shell: ${conn.error}` }
     refresh()
-    return { text: opened.isPlaced ? 'Terminal opened.' : 'Terminal is ready but the pane could not be placed.' }
+    return {
+      text: opened.isPlaced
+        ? 'Terminal opened. Click [ Terminal input ] at the bottom of the pane to type in it.'
+        : 'Terminal is ready but the pane could not be placed.',
+    }
   })
 
   on('command.run', { command: 'term-hide' }, async $ => {
@@ -365,13 +480,22 @@ export const register: Register = on => {
       selection: () => $.ui.selection(),
       append: payload => $.session.append({ message: { type: 'user', content: [{ type: 'text', text: payload }] } }),
       toast: line => $.ui.toast(line),
+      log: line => $.ui.log(line),
       isFullscreen: e.presentation?.isFullscreen,
     })
     return { text }
   })
 
+  // プロンプト欄にキーが入ったら、Terminal はもうキーを受けていない
+  on('prompt.edit', async ($, e, next) => {
+    setTyping(false)
+    return next(e)
+  })
+
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) {
+      typing = false
+      help = false
       visible = false
       generation += 1
     }
@@ -381,6 +505,8 @@ export const register: Register = on => {
   on('ui.message', async ($, e, next) => {
     if (e.requestId !== PANE || e.element !== 'keys') return next(e)
     const data = e.data as { id?: string; keys?: SeqKey[] }
+    // 帯がクリックされたか、キーが届いた
+    typing = true
     if (typeof data.id === 'string' && data.id !== keysId) {
       keysId = data.id
       lastKey = 0
@@ -390,16 +516,39 @@ export const register: Register = on => {
     if (newest !== undefined) {
       lastKey = newest.n
       const page = Math.max(1, (frame?.rows ?? want.rows) - 1)
-      let bytes = ''
       for (const k of fresh) {
+        // ヘルプは、どのキーでも閉じる(そのキーは PTY に送らない)
+        if (help || isHelpKey(k)) {
+          setHelp(!help)
+          continue
+        }
+        // 選択モードの間は、キーを PTY に送らない
+        if (selecting) {
+          for (const action of selectActions(k)) {
+            if (action === 'send') enqueue({ send: true })
+            else {
+              if (action === 'cancel') selecting = false
+              enqueue({ select: action })
+            }
+          }
+          continue
+        }
+        if (isSelectStart(k)) {
+          selecting = true
+          enqueue({ select: 'start' })
+          continue
+        }
+        if (isAddKey(k)) {
+          enqueue({ add: true })
+          continue
+        }
         const dir = scrollKey(k)
         if (dir === 'up') scrollTo(back + page)
         else if (dir === 'down') scrollTo(back - page)
-        else bytes += keyToBytes(k, { appCursor: frame?.appCursor === true })
+        else sendInput(keyToBytes(k, { appCursor: frame?.appCursor === true }))
       }
-      sendInput(bytes)
     }
-    return { props: { ackId: keysId, ack: lastKey, hint: KEY_HINT } }
+    return { props: keyProps() }
   })
 
   // ホイールで履歴をさかのぼる。ペインの中身は常に 1 画面ぶんなので、窓は自分で動かす
@@ -422,6 +571,8 @@ export const register: Register = on => {
     const fullRows = inline ? INLINE_ROWS + CHROME_ROWS : undefined
     const rows = clamp(e.props.scroll.bodyRows - CHROME_ROWS, MIN_ROWS, inline ? INLINE_ROWS : MAX_ROWS)
     requestSize(cols, rows)
+    // ペインの枠(ボタン)がキーボードを持っている間、Client はキーを受けていない
+    if (e.props.isFocused) typing = false
 
     const reconnect = (
       <Button
@@ -464,20 +615,66 @@ export const register: Register = on => {
 
     const f = frame
     // resize が sidecar に届くまでの間も、高さを変えずに描く
-    const shown = lines.length > rows ? lines.slice(lines.length - rows) : lines
-    const blank = Math.max(0, rows - shown.length)
+    const shown = help ? [] : lines.length > rows ? lines.slice(lines.length - rows) : lines
+    const helpLines = help ? HELP_LINES.slice(0, rows) : []
+    const blank = Math.max(0, rows - shown.length - helpLines.length)
     const status =
       f === undefined
         ? 'connecting…'
         : !f.alive
           ? `shell exited${f.exitCode === null ? '' : ` (code ${f.exitCode})`} · /term starts a new one`
           : back > 0
-            ? `history -${back}/${f.history} · shift+PgDn or type to return`
-            : `${f.cols}x${f.rows}${f.history > 0 ? ` · shift+PgUp or wheel: history (${f.history})` : ''}`
+            ? `history -${back}/${f.history}`
+            : ''
+    const sel = f?.select
+    const selectStatus =
+      sel === undefined
+        ? undefined
+        : sel.anchored
+          ? `${sel.lines} line${sel.lines === 1 ? '' : 's'}, ${sel.chars} chars · enter: add to Claude · q: cancel`
+          : 'hjkl/arrows: move · v: start · V: lines · q: cancel'
 
+    // 選択モードの間、キーは Client に行くので、ボタンは出さない
+    const controls =
+      selectStatus !== undefined
+        ? [
+            <Text color="yellow" wrap="truncate">
+              {' '}
+              {selectStatus}
+            </Text>,
+          ]
+        : [
+            <Text> </Text>,
+            <Button
+              key="add"
+              label="Add to Claude"
+              onPress={async () => {
+                const result = await addToClaude({
+                  selection: () => $.ui.selection(),
+                  append: payload =>
+                    $.session.append({ message: { type: 'user', content: [{ type: 'text', text: payload }] } }),
+                  // 成功時は addToClaude が toast を出す。それ以外の結果は下でまとめて出す
+                  toast: () => undefined,
+                  log: line => $.ui.log(line),
+                  isFullscreen: e.viewport?.isFullscreen,
+                })
+                $.ui.toast(result)
+              }}
+            />,
+            <Text> </Text>,
+            <Button key="help" label="Help" onPress={async () => setHelp(!help)} />,
+            <Text dimColor wrap="truncate">
+              {' '}
+              {status}
+            </Text>,
+          ]
     return (
       <Box flexDirection="column" minHeight={fullRows}>
-        <Client key="keys" module="./keys.tsx" props={{ ackId: keysId, ack: lastKey, hint: KEY_HINT }} />
+        {helpLines.map((line, i) => (
+          <Text bold={i === 0} wrap="truncate">
+            {line}
+          </Text>
+        ))}
         {shown.map(runs => (
           <Text wrap="truncate">
             {runs.length === 0
@@ -506,39 +703,8 @@ export const register: Register = on => {
           <Text> </Text>
         ))}
         <Box>
-          <Button
-            key="add"
-            hotkey="a"
-            label="Add to Claude"
-            onPress={async () => {
-              const result = await addToClaude({
-                selection: () => $.ui.selection(),
-                append: payload =>
-                  $.session.append({ message: { type: 'user', content: [{ type: 'text', text: payload }] } }),
-                // 成功時は addToClaude が toast を出す。それ以外の結果は下でまとめて出す
-                toast: () => undefined,
-                isFullscreen: e.viewport?.isFullscreen,
-              })
-              $.ui.toast(result)
-            }}
-          />
-          <Text> </Text>
-          <Button
-            key="paste"
-            hotkey="p"
-            label="Paste prompt text"
-            onPress={async () => {
-              // ペーストは Mod に届かず、プロンプト欄に入る。そこにある下書きを Terminal へ送って空にする
-              const draft = await $.prompt.read()
-              if (draft.text === '') return $.ui.toast('Paste into the prompt box first, then press this.')
-              sendInput(pasteBytes(draft.text, frame?.bracketedPaste === true))
-              await $.prompt.fill({ text: '', mode: 'replace' })
-            }}
-          />
-          <Text dimColor wrap="truncate">
-            {' '}
-            {status}
-          </Text>
+          <Client key="keys" module="./keys.tsx" props={keyProps()} />
+          {controls}
         </Box>
       </Box>
     )

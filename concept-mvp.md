@@ -364,7 +364,14 @@ MVPでは実装コストとTerminal UIとの相性を考慮して決定する。
 - `/term-add` コマンド(Option B に相当。選択は `$.ui.selection()` で読む)
 - ペイン内の `[ Add to Claude ]` ボタン(Option C に相当)
 
-Option A の右クリックメニューは、Mods API に手段が見つかっていないので採らない。`Ctrl+Shift+C` のような任意のキーも Mod には割り当てられないため、キーでの起動は Phase 3 で検討する。
+Option A の右クリックメニューは、Mods API に手段が見つかっていないので採らない。
+
+**追加(2026-10-05、使ってみて出た改善要望への対応):** マウスを使わない経路を足した。どちらも、ペイン上端の帯がキーを受けている間に使う。
+
+- 選択モード: `alt+v` で入り、vi 風のキー(`h` `j` `k` `l`、矢印、`w` / `b`、`0` / `$`、`g` / `G`)で動き、`v`(文字単位)か `V`(行単位)で始点を置き、`enter` で Claude に渡す。`q` か `ctrl+]` で取り消す。選択範囲は反転表示される。
+- `alt+a`: マウスで選択したテキストを渡す(`/term-add` と同じ)。
+
+`Ctrl+Shift+C` のような、プロンプトにフォーカスがあるままのキーは、Mod には割り当てられない。
 
 ---
 
@@ -385,6 +392,14 @@ Added 142 characters to Claude Context
 ```
 
 ユーザーが「本当にClaudeへ渡ったのか」を確認できることが重要。
+
+**決定(2026-10-05):** Toast に加えて、何を渡したかをトランスクリプトに 1 行で出す(`$.ui.log`。この行は Claude には渡らない)。見出し(行数、文字数、シェルの cwd)と、先頭の 3 行、残りの行数。
+
+```text
+● terminal: Terminal → Claude: 4 lines, 142 chars (/home/user/project) │ Expected: 200 │ Received: 500 │ at test.js:12 │ … +1 line
+```
+
+ペインの状態の行にも、直近の追加を `added 4 lines` と出す。
 
 ---
 
@@ -978,7 +993,7 @@ Phase 1 で答えが出たもの。根拠は `docs/architecture.md` の「Phase 
 | 問い | 答え |
 | :- | :- |
 | クリックなしで Terminal にフォーカスを移せるか | 移せない。`$.ui.focus` は `Client` を対象にできない。ペイン上端の帯をクリックしてから打つ |
-| ペーストをどう Terminal に届けるか | ペーストはプロンプト欄に入るので、ペインの `[ Paste prompt text ]` ボタンでその下書きを Terminal へ送る |
+| ペーストをどう Terminal に届けるか | 届けない。ペーストはプロンプト欄に入る。下書きを Terminal へ送る `[ Paste prompt text ]` ボタンを作ったが、用途が無いので 2026-10-05 に削除した |
 | scrollback をペインでどうスクロールさせるか | ホイール、または `shift+PageUp` / `shift+PageDown`。履歴は 5000 行まで |
 
 残っているもの:

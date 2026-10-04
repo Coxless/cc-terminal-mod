@@ -11,7 +11,9 @@ Claude Code を終了せずに、その場で Terminal Pane を開いて操作�
 - Phase 0(Feasibility Spike)は完了。判定は Go。
 - Phase 1(Terminal Only)の Step 1〜5 と、Phase 2(Context Bridge)の Step 1〜3 は実装済み。Mod 本体は `mod/`。完了条件は、入れ子の Claude Code(検証ハーネス)で確認した。
 - 残っているのは、ユーザーが実機(Ghostty)で確認する項目(Phase 1 Step 6)、Phase 2 Step 4 のうち compaction 後の扱いと vim 画面からの追加、tmux・非フルスクリーンでの確認。一覧は `docs/architecture.md` の「まだ確認できていないこと」。
-- Phase 3(Polish)は未着手。着手前に、各項目をやるかどうかをユーザーと決める。
+- 使ってみて出た改善要望 4 件(フォーカスの表示、送った Context の可視化、キーボードでの選択、キーボードでの送信)は実装済み。検証ハーネスで確認した。色と反転の見え方は実機で未確認。
+- 改善要望その 2(`a:` / `p:` の表示、上端の帯の削除とヘルプ、下の行の整理)は実装済み。検証ハーネスで確認した。実機では未確認。ショートカットでの切り替えは、いったん見送った(コマンド行を試作して外した)。
+- Phase 3(Polish)のほかの項目は未着手。着手前に、各項目をやるかどうかをユーザーと決める。
 - `spike/phase0/` は Phase 0 の PoC(Python sidecar)、`spike/phase1/` は Bun の PTY の確認スクリプト。どちらも参照用。
 
 ## 決まっていること
@@ -20,10 +22,17 @@ Claude Code を終了せずに、その場で Terminal Pane を開いて操作�
 - PTY と VT エミュレーションは sidecar プロセスが持つ。hooks モジュールは画面の状態を持たない。
 - sidecar は TypeScript + Bun。PTY は Bun 組み込み、VT エミュレータは `@xterm/headless`。`bun build --compile` で単一バイナリにして Mod に同梱する(Phase 1 Step 1 で成立を確認済み。Node.js への切り替えは不要)。
 - hooks モジュールと sidecar の通信は Unix ソケット上の HTTP(`$.http.fetch` の `socketPath`)。出力は long-poll。
-- 画面は hooks モジュールが `Text` 行で描く。キーは 1 行の `Client` で受ける。カーソルは sidecar が反転属性として画面に含める。
+- 画面は hooks モジュールが `Text` 行で描く。キーは `Client` で受ける。カーソルは sidecar が反転属性として画面に含める。
+- Terminal に入力するには、ペインの下の行の `[ Terminal input ]` をクリックする。キーボードだけで Terminal に切り替える手段は置かない(ユーザーの判断で見送り。`Input` のコマンド行を試作したが外した)。Terminal の画面のクリックでは入力にならない。
+- ペインの下の行は、左詰めで `[ Terminal input ]` `[ Add to Claude ]` `[ Help ]` と状態(1 行)。`[ Terminal input ]` は `Client` で、当たり判定は見出しの上だけ。ポインタが乗っている間、`Button` と同じく反転させる。状態に出すのは、接続中、シェルの終了、さかのぼっている位置、選択の範囲だけ(画面の大きさなどは出さない)。ボタンに `hotkey` は付けない。
+- ペインの上端に帯は置かない。`Client` は下の行の左端に置き、`[ Terminal input ]`(クリックでキーを受ける)、受けている間は `TERMINAL · alt+h: help`、選択モードでは `SELECT` と出す。以下で「帯」と書いているのは、この `Client` のこと。
+- キーの割り当ての説明は、ペインのヘルプに出す(Terminal の行の代わりに描く)。開くのは `alt+h`(`Client` がキーを受けている間)と `[ Help ]`。どのキーでも閉じ、そのキーは PTY に送らない。文面は `mod/shared/keys.ts` の `HELP_LINES`。
 - コマンドは `/term`(開く)、`/term-hide`(閉じる。シェルは残す)、`/term-add`(選択を Claude に渡す)。すべて `immediate: true`。
+- キーボードでの選択は「選択モード」。`alt+v` で入り、vi 風のキーで動き、`v` / `V` で始点、`enter` で Claude に渡す、`q` / `ctrl+]` で取り消す。`alt+a` は、マウスで選択したテキストを渡す。どれも帯がキーを受けている間だけ効く。割り当ては `mod/shared/keys.ts`。
+- 選択モードの状態とハイライトは sidecar が持つ(フレームに色として含める)。hooks モジュールが覚えるのは、キーをどちらへ送るかだけ。
+- 渡した内容は、Toast に加えて `$.ui.log` でトランスクリプトに 1 行出す(見出し + 先頭 3 行 + 残りの行数。Claude には渡らない)。
 - 履歴(scrollback)は sidecar が 5000 行まで持ち、`/frame` の `back` で窓を動かす。操作はホイールと `shift+PageUp` / `shift+PageDown`。キーを打つと末尾へ戻る。出力が増えても、さかのぼっている位置は保つ。
-- ペーストは、プロンプト欄に入った下書きをペインの `[ Paste prompt text ]` ボタンで Terminal へ送る。クリップボードを直接読むことはしない。
+- ペーストは Terminal に届けない。`[ Paste prompt text ]` ボタン(プロンプト欄の下書きを Terminal へ送る)は、用途が無いとのユーザーの判断で削除した。クリップボードを直接読むこともしない。
 - ペイロードの `Working directory` は、sidecar が返すシェルの実際の cwd。取れなければ行を出さない。会話側の選択(`requestId` つき)は追加しない。
 - Escape / Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+X は Mod に届かないので、代替キーで送る。当面の割り当ては `ctrl+]` = Escape、`alt+c` / `alt+d` / `alt+z` / `alt+x` = Ctrl+C / D / Z / X。
 - Claude への受け渡しは `$.session.append`。
@@ -127,11 +136,16 @@ Phase 0〜2 で実機確認したもの。根拠と数値は `docs/architecture.
 ### キー入力
 
 - 生のキーを受け取れるのは `Client` の surface モジュール(`surface.onKey`)だけ。クリックでフォーカスを得る。
-- **`$.ui.focus` では `Client` にフォーカスを移せない**(対象は `Button` / `Input` / `Select` だけ。数秒待って deny が返り、その間コマンドが返らない)。呼ばない。
+- **`$.ui.focus` では `Client` にフォーカスを移せない**(対象は `Button` / `Input` / `Select` だけ。数秒待って deny が返り、その間コマンドが返らない)。呼ばない。`ctrl+x tab` の後の Tab / Enter でも移らない。
+- `Input` は `autoFocus` で、`open({ focus: true })` と `ctrl+x tab` のときにキーを受ける。届くのは文字、Backspace、Enter。Tab、上下の矢印、Ctrl / Alt つきのキーは届かない。
+- ペインの枠がフォーカスを持っている間に打った文字はプロンプト欄に入り、ペインはフォーカスを失う。`prompt.edit` でキーを消費しても同じ。
+- `Button` の `hotkey` は、帯(`Client`)や `Input` がキーを受けている間は効かない。
 - キーの連番は `Client` のインスタンスごと。`Client` は自分の id を一緒に送り、hooks 側は id が変わったら数え直す。
 - 届かないキー: Escape(`ctrl+[` も)、Ctrl+C、Ctrl+D、Ctrl+X、Ctrl+Z(Claude Code 自体がサスペンドする)、ペースト(プロンプト欄に入る)。
 - `insert` とファンクションキーは、`key` に生のエスケープシーケンスが入って届く。**制御文字を含む文字列を `Text` に入れると tree が拒否され、`Client` が unmount される。** 表示前にエスケープする。
 - `alt+b` は `{ key: 'left', meta: true }` に正規化されて届く。
+- **`Client` がフォーカスを得た・失ったを知る API は無い。** `Pane` の `isFocused` は、`Client` がキーを受けている間も false。帯のクリックとキーの到着で「受けている」と推定し、`prompt.edit` と `isFocused` が true で下ろす。Escape の直後は検知できない。
+- ペインの中身(Terminal の行、ボタン)をクリックすると、ペインの枠がフォーカスを持ち、`Client` はキーを失う。
 - `surface.post` は 1 フレーム 1 件で後勝ち。キーに連番を振り、ack が来るまで未送達分をまとめて再送する。
 - プロンプトにフォーカスがある状態で Claude の作業中に Escape を押すと、ターンが中断される。
 
@@ -146,6 +160,8 @@ Phase 0〜2 で実機確認したもの。根拠と数値は `docs/architecture.
 - **`Text` の `color` は「テーマのキー、色の名前、hex」だけ。** `ansi:red` は tree ごと拒否される。`red` などの名前は Claude Code 側の RGB になり、端末の ANSI 色にはならない。
 - ペインの上のホイールは `ui.scroll` として届く(`by` が行数)。中身を 1 画面ぶんに保ち、hook が `next` を呼ばずに答えれば、窓は動かない。
 - 本体側の変化(プロンプト欄が複数行になる、許可ダイアログが出る)でペインの高さが変わる。resize は debounce する。
+- `$.ui.log` は改行を出せない(1 行にまとめられる)。行ごとに呼ぶと、あいだに空行が入る。
+- `session.start` の `$` を閉じ込めた `$.session.append` / `$.ui.toast` / `$.ui.log` / `$.ui.selection` は、後から呼べる。
 - ペインはユーザー操作(コマンド)で開く。Claude の作業中に使うコマンドは `immediate: true` で登録する。
 
 ## ドキュメントの書き方

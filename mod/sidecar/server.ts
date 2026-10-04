@@ -3,10 +3,15 @@ import { chmodSync } from 'node:fs'
 import {
   MAX_WAIT_MS,
   PROTOCOL_VERSION,
+  SELECT_OPS,
   type Info,
   type InputRequest,
   type OkResponse,
   type ResizeRequest,
+  type SelectOp,
+  type SelectRequest,
+  type SelectResponse,
+  type SelectionResponse,
 } from '../shared/protocol'
 import type { Session } from './session'
 
@@ -60,6 +65,9 @@ export function serve(session: Session, opts: ServerOptions) {
               const back = num(u.searchParams.get('back'), 0)
               return Response.json(await session.frame(since, wait, back))
             }
+            if (u.pathname === '/selection') {
+              return Response.json({ text: session.selectionText() } satisfies SelectionResponse)
+            }
             if (u.pathname === '/info') return Response.json(info(session, opts.watchPid))
             return fail('not found', 404)
           }
@@ -78,6 +86,12 @@ export function serve(session: Session, opts: ServerOptions) {
             }
             session.resize(cols, rows)
             return ok()
+          }
+          if (u.pathname === '/select') {
+            const { op, back } = body as Partial<SelectRequest>
+            if (!SELECT_OPS.includes(op as SelectOp)) return fail('unknown op')
+            const result = session.select(op as SelectOp, typeof back === 'number' ? back : 0)
+            return Response.json({ ok: true, ...result } satisfies SelectResponse)
           }
           if (u.pathname === '/kill') {
             setTimeout(opts.onKill, 50)

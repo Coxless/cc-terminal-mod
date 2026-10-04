@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { buildPayload, isEmptySelection, pasteBytes } from './payload'
+import { buildPayload, isEmptySelection, summarize } from './payload'
 
 test('ペイロード: concept-mvp.md §9 の形式', () => {
   expect(buildPayload('Expected: 200\nReceived: 500', '/workspace/project')).toBe(
@@ -33,8 +33,27 @@ test('空の選択', () => {
   expect(isEmptySelection(' a ')).toBe(false)
 })
 
-test('ペースト', () => {
-  expect(pasteBytes('a\nb\r\nc', false)).toBe('a\rb\rc')
-  expect(pasteBytes('a\nb', true)).toBe('\x1b[200~a\rb\x1b[201~')
-  expect(pasteBytes('x\x1b[201~rm -rf', true)).toBe('\x1b[200~xrm -rf\x1b[201~')
+test('渡した内容の要約: 見出しと先頭の 3 行', () => {
+  expect(summarize('Expected: 200\nReceived: 500\n', '/work')).toEqual([
+    'Terminal → Claude: 2 lines, 28 chars (/work)',
+    '│ Expected: 200',
+    '│ Received: 500',
+  ])
+  expect(summarize('a\nb\nc\nd\ne', null)).toEqual([
+    'Terminal → Claude: 5 lines, 9 chars',
+    '│ a',
+    '│ b',
+    '│ c',
+    '│ … +2 lines',
+  ])
+  expect(summarize('one', null)).toEqual(['Terminal → Claude: 1 line, 3 chars', '│ one'])
+  expect(summarize('a\nb\nc\nd', null)[4]).toBe('│ … +1 line')
+})
+
+test('渡した内容の要約: 長い行は幅で切り、全角は 2 として数え、制御文字は出さない', () => {
+  const [, long] = summarize('x'.repeat(200), null, 20)
+  expect(long).toBe('│ ' + 'x'.repeat(17) + '…')
+  const [, wide] = summarize('日'.repeat(50), null, 20)
+  expect(wide).toBe('│ ' + '日'.repeat(8) + '…')
+  expect(summarize('a\tb\x1b[0m', null)[1]).toBe('│ a b [0m')
 })
