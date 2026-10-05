@@ -31,7 +31,7 @@ AC は `concept-mvp.md` §19。
 | Phase 2 Step 4 | アイドル時・作業中・会話の記録は確認した。compaction の後の扱いと、vim の画面からの追加(Scenario 3)は未確認 |
 | Phase 3 の改善要望 4 件 | 完了(下の「改善要望への対応計画」)。色と反転の見え方は、ユーザーの実機での確認が残っている |
 | Phase 3 の改善要望 その 2 | 完了(下の行の整理、ヘルプ)。ショートカットでの切り替えは見送り |
-| Phase 3 の配布 | 完了。Linux x64 のみ。開発は `develop`、配布は `main`(バイナリは CI が `main` にコミットする) |
+| Phase 3 の配布 | 完了。Linux x64 のみ。開発は `develop`、リリースは `main` へのマージ。zip を GitHub Releases に置く |
 | Phase 3 のほかの項目 | 未着手。各項目をやるかどうかを、ユーザーと決めるところから |
 
 ユーザーは実機で MVP を動かした(2026-10-05)。実機での項目ごとの結果(Phase 1 Step 6 の一覧)は、まだ記録していない。
@@ -280,7 +280,7 @@ Phase 1、2 を使ってみてから優先度を決める。着手前に、各�
 | マウス | Terminal 内のアプリ(vim、less)へのマウス転送。選択と両立しないので、やるなら切り替え方式を決める |
 | 画面クリックで入力 | `Client` に画面を描かせて選択を自作する方式(`docs/architecture.md` 技術的制約 3)。クリップボードへのコピーも含む |
 | ~~macOS~~ | やらない。対応は Linux x64 だけ(ユーザーの判断、2026-10-05) |
-| 配布 | 実施済み(2026-10-05)。このリポジトリがマーケットプレイス(`.claude-plugin/marketplace.json`)で、取得元は `main` の `mod/`。Linux x64 のバイナリは、`main` への push で CI(`.github/workflows/ci.yml`)がビルドしてコミットする。開発は `develop`。README を追加した |
+| 配布 | 実施済み(2026-10-05)。このリポジトリがマーケットプレイス(`.claude-plugin/marketplace.json`)。取得元は GitHub Releases の zip(`mod/` + Linux x64 のバイナリ)。`main` への push で CI(`.github/workflows/ci.yml`)がビルド、公開、`marketplace.json` の書き換えを行う。開発は `develop`。README を追加した |
 | API 追従 | 対象バージョンの明記。Claude Code の更新時に回す確認手順。CI は `CLAUDE_CODE_VERSION` で版を固定しているので、上げて CI を回せば、validate・型チェック・テストまでは確認できる |
 
 ### 使ってみて出た改善要望(2026-10-05)

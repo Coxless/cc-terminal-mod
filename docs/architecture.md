@@ -418,19 +418,29 @@ Phase 1 で解くこと(結果は「Phase 1・2 で確認したこと」):
 ### 配布(2026-10-05)
 
 - 対応は Linux x64 だけ。sidecar のバイナリが Linux x64 用で、シェルの cwd の取得も `/proc` に依存している。ほかのプラットフォームでは、バイナリを実行できず、ペインに `Failed to start shell.` と理由が出る(未確認)。
-- ブランチは、開発が `develop`、配布が `main`。リリースは `develop` を `main` に取り込むこと。
-- マーケットプレイスの定義は `.claude-plugin/marketplace.json`。プラグインの `source` は相対パスの `./mod`。利用者が `Coxless/cc-terminal-mod` を追加すると既定ブランチ(`main`)が clone され、その `mod/` が使われる。
-- バイナリ(約 81 MB)は `main` にだけ入れる。`main` への push のたびに CI がビルドし、前回と中身が違えばコミットする。`develop` では `.gitignore` の対象のまま。
-- バイナリが変わるたびに、`main` の履歴は約 81 MB 増える。GitHub の 1 ファイルの上限(100 MB)には収まっている。
-- 利用者に更新が届くのは、`plugin.json` の `version` が変わったときだけ(Docs)。`main` 向けの pull request は、`version` が `main` と同じだと CI が落ちる。
-- 最初に試した方式(配布専用の `release` ブランチを、親の無い 1 コミットとして毎回 force push で作り直す。プラグインの `source` は `git-subdir` の `ref: release`)は、ユーザーの判断でやめた。この方式でのインストールは、隔離した設定ディレクトリで通ることを確認していた。
+- ブランチは、開発が `develop`、リリースが `main`。リリースは `develop` を `main` に取り込むこと。
+- 配るのは zip。中身は、git が追跡している `mod/` のファイルと、sidecar のバイナリ(`scripts/package.sh`)。約 36 MB(展開すると約 81 MB)。GitHub Releases に `v<version>` として置く。
+- マーケットプレイスの定義は `.claude-plugin/marketplace.json`。プラグインの `source` は `archive`(zip の URL と `sha256`)。リリースのたびに、CI が `main` で書き換える。
+- バイナリは、どのブランチにも入れない。履歴は増えない。
+
+一時的なリリースを作って、隔離した設定ディレクトリで確認したこと:
+
+- zip から入れたバイナリは、実行権限(`rwxr-xr-x`)を保ったままキャッシュに置かれる。
+- `marketplace.json` の URL と `sha256` を 0.1.1 の zip に書き換えると、`claude plugin update` が `updated from 0.1.0 to 0.1.1` と更新した。書き換える前は `already at the latest version`。版は、zip の中の `plugin.json` の `version` から決まる。
+- GitHub Releases のダウンロード URL(リダイレクトを挟む)は、`archive` の取得元として使えた。
+
+採らなかった方式:
+
+- 配布専用の `release` ブランチを、親の無い 1 コミットとして毎回 force push で作り直す(`source` は `git-subdir`)。インストールは通った。開発を `develop`、リリースを `main` へのマージにするという判断で、やめた。
+- CI がバイナリを `main` にコミットする(`source` は相対パスの `./mod`)。バイナリが変わるたびに、`main` の履歴が約 37 MB(圧縮後)増える。
+- `main` を毎回作り直す。履歴は増えないが、`develop` と共通の履歴がなくなり、pull request でリリースできない。
 
 ### CI(2026-10-05)
 
 - `claude plugin validate` と `claude plugin test` は、ログインしていない環境でも動く。
 - **hooks の型定義(`mod/.claude-plugin/types/`)は、validate や test では配置されない。** Mod をロードしたときに配置される。未ログインの `claude --plugin-dir ./mod -p hi` は `Not logged in` で終わるが、その時点で型定義は配置されている。CI はこれを使って `tsc` を回している。
 - sidecar のテスト(実際にシェルを PTY で起動する)は、GitHub Actions の runner(Ubuntu 24.04)でも通った。
-- `main` での配布のジョブ(バイナリのコミット)は、最初のリリースまで動かない。
+- `main` でのリリースのジョブ(zip の公開と `marketplace.json` の書き換え)は、最初のリリースまで動かない。手順の一つひとつ(zip の作成、zip からのインストール、更新の検知)は、上のとおり手元で確認した。
 
 ### まだ確認できていないこと
 
