@@ -1,0 +1,8 @@
+{
+  "name": "terminal",
+  "version": "0.1.0",
+  "description": "Open a real terminal pane inside Claude Code and hand selected text to Claude",
+  "author": {
+    "name": "Coxless"
+  }
+}

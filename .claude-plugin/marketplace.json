@@ -1,0 +1,15 @@
+{
+  "name": "coxless",
+  "description": "A terminal pane inside Claude Code that hands selected text to Claude",
+  "owner": { "name": "Coxless" },
+  "plugins": [
+    {
+      "name": "terminal",
+      "description": "Open a real terminal pane inside Claude Code and hand selected text to Claude (Linux x64 only)",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/Coxless/cc-terminal-mod/releases/download/v0.1.0/terminal-0.1.0.zip"
+      }
+    }
+  ]
+}

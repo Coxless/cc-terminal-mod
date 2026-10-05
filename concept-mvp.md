@@ -133,6 +133,8 @@ Terminal Paneを開く/閉じる
 
 ショートカットは実装時にClaude Codeとの競合を確認して決定する。
 
+**決定:** 開閉はコマンドで行う。`/term`(開く)と `/term-hide`(閉じる)。プロンプトから押せるショートカットは、Mods API に手段が見つかっていない(Phase 3 の「ペインを開くキー」)。
+
 ---
 
 # 5. Terminal Requirements
@@ -159,6 +161,8 @@ Terminal Paneは「見た目だけのTerminal」ではなく、PTYを利用し�
 - copy
 
 **Phase 0 で確認した制約:** Escape / Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+X とペーストは Claude Code 本体が処理し、Mod には届かない。Terminal へは代替キーで送る。当面の割り当ては `ctrl+]` = Escape、`alt+c` / `alt+d` / `alt+z` / `alt+x` = Ctrl+C / D / Z / X。詳細は `docs/architecture.md` §2。
+
+**Phase 1 で確認した制約:** キー入力を始めるには、ペインの下の行の `[ Terminal input ]` をクリックする必要がある。ペーストを Terminal に届ける手段は無い(プロンプト欄に入る)。copy は、端末のネイティブの選択とコピーに任せる(Mod からクリップボードには書かない)。Terminal の 16 色は Claude Code 側の色に置き換わり、端末の配色どおりにはならない。
 
 ### Shell
 
@@ -362,7 +366,14 @@ MVPでは実装コストとTerminal UIとの相性を考慮して決定する。
 - `/term-add` コマンド(Option B に相当。選択は `$.ui.selection()` で読む)
 - ペイン内の `[ Add to Claude ]` ボタン(Option C に相当)
 
-Option A の右クリックメニューは、Mods API に手段が見つかっていないので採らない。`Ctrl+Shift+C` のような任意のキーも Mod には割り当てられないため、キーでの起動は Phase 3 で検討する。
+Option A の右クリックメニューは、Mods API に手段が見つかっていないので採らない。
+
+**追加(2026-10-05、使ってみて出た改善要望への対応):** マウスを使わない経路を足した。どちらも、ペインの下の行の `[ Terminal input ]` がキーを受けている間に使う。
+
+- 選択モード: `alt+v` で入り、vi 風のキー(`h` `j` `k` `l`、矢印、`w` / `b`、`0` / `$`、`g` / `G`)で動き、`v`(文字単位)か `V`(行単位)で始点を置き、`enter` で Claude に渡す。`q` か `ctrl+]` で取り消す。選択範囲は反転表示される。
+- `alt+a`: マウスで選択したテキストを渡す(`/term-add` と同じ)。
+
+`Ctrl+Shift+C` のような、プロンプトにフォーカスがあるままのキーは、Mod には割り当てられない。
 
 ---
 
@@ -383,6 +394,12 @@ Added 142 characters to Claude Context
 ```
 
 ユーザーが「本当にClaudeへ渡ったのか」を確認できることが重要。
+
+**決定(2026-10-05):** Toast に加えて、何を渡したかをトランスクリプトに 1 行で出す(`$.ui.log`。この行は Claude には渡らない)。見出し(行数、文字数、シェルの cwd)と、先頭の 3 行、残りの行数。
+
+```text
+● terminal: Terminal → Claude: 4 lines, 142 chars (/home/user/project) │ Expected: 200 │ Received: 500 │ at test.js:12 │ … +1 line
+```
 
 ---
 
@@ -480,6 +497,8 @@ Failed to add selection to Claude Context.
 ```
 
 エラーによってClaude Code本体のセッションを終了させない。
+
+**実装:** Shell 起動失敗は `Failed to start shell.` と理由、`[ Retry ]`。sidecar の切断は `Terminal process disconnected.` と `[ Reconnect ]`(新しいシェルになる)。Context 追加失敗は、理由と「`/term-add` でやり直す」の案内を 1 行で出す(ボタンは出さない)。
 
 ---
 
@@ -969,13 +988,18 @@ Phase 0 で答えが出たもの。根拠は `docs/architecture.md`。
 | Claude が作業中に Context 追加したときの UX | 追加した行は同じターンの次のリクエストから読まれる |
 | Hide で PTY を保持するか | 保持する。sidecar は Hide、Mod のリロード、`/clear` をまたいで生きる |
 | Terminal を右に置くか下に置くか | Claude Code が決める。110 列以上は右に dock、それ未満はプロンプトの上に inline |
-| Terminal Pane を開く操作 | `/term` コマンド |
+| Terminal Pane を開く操作 | `/term` コマンド(閉じるのは `/term-hide`) |
+
+Phase 1 で答えが出たもの。根拠は `docs/architecture.md` の「Phase 1・2 で確認したこと」。
+
+| 問い | 答え |
+| :- | :- |
+| クリックなしで Terminal にフォーカスを移せるか | 移せない。`$.ui.focus` は `Client` を対象にできない。ペインの下の行の `[ Terminal input ]` をクリックしてから打つ |
+| ペーストをどう Terminal に届けるか | 届けない。ペーストはプロンプト欄に入る。下書きを Terminal へ送る `[ Paste prompt text ]` ボタンを作ったが、用途が無いので 2026-10-05 に削除した |
+| scrollback をペインでどうスクロールさせるか | ホイール、または `shift+PageUp` / `shift+PageDown`。履歴は 5000 行まで |
 
 残っているもの:
 
-- クリックなしで Terminal にフォーカスを移せるか(`$.ui.focus`)
-- ペーストをどう Terminal に届けるか
-- scrollback をペインでどうスクロールさせるか
 - 代替キーの割り当てを見直すか、設定可能にするか
 - tmux、非フルスクリーン表示での選択
 - Claude Code アップデート時の互換性。Mods API は early access でリリースごとに変わる。対象バージョンを明示し、更新のたびに `claude plugin validate` とテストを回す

@@ -1,0 +1,3 @@
+# Claude Code が配置する型定義とコンパイル済みのバイナリは整形しない
+mod/.claude-plugin/types/
+mod/bin/
