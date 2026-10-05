@@ -60,7 +60,8 @@ Mods は Claude Code v2.1.287 以降が必要。これまでの確認は、す�
 ```text
 .claude-plugin/marketplace.json  # マーケットプレイスの定義(プラグインの取得元は GitHub Releases の zip。CI が書き換える)
 scripts/package.sh               # 配布用の zip を作る(mod/ の追跡ファイル + バイナリ)
-.github/workflows/ci.yml         # CI(検証)と CD(main への push で zip を Releases に置く)
+.github/workflows/ci.yml         # CI(検証)。develop への push と pull request で回る
+.github/workflows/release.yml    # CD(main への push で ci.yml を呼び出し、通れば zip を Releases に置く)
 mod/
 ├── .claude-plugin/plugin.json   # name: "terminal", version, description
 ├── hooks/hooks.json             # { "modules": ["./register.tsx"] }
@@ -106,15 +107,15 @@ workshop refresh                    # dev.yaml の base / sdks、SDK の hooks �
 
 sidecar のソースを変えたら `workshop run -- build` を実行する。バイナリは git に無いので、clone した直後も必要。中身は `bun build --compile --minify mod/sidecar/main.ts --outfile mod/bin/terminal-sidecar`。
 
-CI と配布(`.github/workflows/ci.yml`):
+CI(`.github/workflows/ci.yml`)と配布(`.github/workflows/release.yml`):
 
-- `develop` / `main` への push と、pull request のたびに、`bun test`、prettier の確認、`tsc` 2 回、`claude plugin validate`(Mod とマーケットプレイス)、`claude plugin test`、sidecar のビルドを回す。
-- `main` への push では、続けてリリースを行う。sidecar をビルドし、`scripts/package.sh` で zip にまとめ、GitHub Releases に `v<version>` として置く。そのあと `marketplace.json` の `source` を、その zip の URL と SHA-256 に書き換えて `main` にコミットする(`github-actions[bot]`)。同じ `version` のリリースがすでにあれば、何もしない。
+- `develop` への push と、pull request のたびに、`bun test`、prettier の確認、`tsc` 2 回、`claude plugin validate`(Mod とマーケットプレイス)、`claude plugin test`、sidecar のビルドを回す。
+- `main` への push では、`release.yml` が動く。まず `ci.yml` を呼び出して(`workflow_call`)同じ検証を回し、通ればリリースを行う。sidecar をビルドし、`scripts/package.sh` で zip にまとめ、GitHub Releases に `v<version>` として置く。そのあと `marketplace.json` の `source` を、その zip の URL と SHA-256 に書き換えて `main` にコミットする(`github-actions[bot]`)。同じ `version` のリリースがすでにあれば、何もしない。
 - **リリースの手順:** `develop` で `mod/.claude-plugin/plugin.json` の `version` を上げる → `develop` から `main` へ pull request → マージ。`version` を変えないと利用者に更新が届かないので、`main` 向けの pull request は、`version` が `main` と同じだと CI が落ちる。
 - `main` には、CI が `marketplace.json` を書き換えたコミットがある(`develop` には無い)。`develop` で `source` に触れなければ、次のリリースでも衝突しない。squash でマージすると履歴が分かれて衝突するので、マージコミットで入れる。
 - `develop` の `marketplace.json` の `source` は、古いリリースを指したままになる。正しいのは `main` のもの。
 - マージしてから CI が書き換えるまでの数分は、`main` の `marketplace.json` が 1 つ前のリリースを指している(利用者には 1 つ前の版が入る。壊れた状態にはならない)。
-- CI の Claude Code の版は、ワークフローの `CLAUDE_CODE_VERSION` で固定している。Bun の版は `.workshop/bun/hooks/setup-base` から読む。
+- CI の Claude Code の版は、`ci.yml` の `CLAUDE_CODE_VERSION` で固定している。Bun の版は `.workshop/bun/hooks/setup-base` から読む。
 - hooks の型定義は git に無い。CI では、未ログインのまま `claude --plugin-dir ./mod -p hi` を実行して配置させている(実行は失敗するが、配置はその前に済む。API は呼ばれない)。
 
 変更したら回すもの: `workshop run -- build`、`workshop run -- test`、`workshop run -- lint`、`claude plugin validate ./mod`、`claude plugin test ./mod`。CI も同じものを回す。

@@ -1,13 +1,12 @@
-# CI: develop / main への push と pull request で、テスト・型チェック・整形の確認・Mod の検証・sidecar のビルドを回す。
-# CD: main への push(= リリース)で、sidecar をビルドして zip にまとめ、GitHub Releases に置く。
-#     そのあと、マーケットプレイス(.claude-plugin/marketplace.json)の取得元を、その zip の URL と SHA-256 に書き換えて
-#     main にコミットする。バイナリは、どのブランチにも入れない。
+# CI: develop への push と pull request で、テスト・型チェック・整形の確認・Mod の検証・sidecar のビルドを回す。
+# main への push では、リリース(release.yml)がこのワークフローを呼び出す。ここでは起動しない(2 回走らせないため)。
 name: CI
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop]
   pull_request:
+  workflow_call:
 
 env:
   # Mods API は early access でリリースごとに変わる。型定義もこの版のものを使うので、固定している。
@@ -77,69 +76,3 @@ jobs:
 
       - name: Build the sidecar
         run: bun build --compile --minify mod/sidecar/main.ts --outfile mod/bin/terminal-sidecar
-
-  release:
-    needs: check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    concurrency: release
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v5
-
-      # 同じ version のリリースがすでにあれば、何もしない(出し直しても、利用者には届かない)
-      - name: Decide whether to release
-        id: version
-        run: |
-          version=$(jq -r .version mod/.claude-plugin/plugin.json)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if gh release view "v$version" > /dev/null 2>&1; then
-            echo "v$version is already released. Nothing to do."
-            echo "needed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "needed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Read the Bun version
-        if: steps.version.outputs.needed == 'true'
-        id: bun
-        run: echo "version=$(sed -n 's/.*BUN_VERSION:-\([0-9.]*\).*/\1/p' .workshop/bun/hooks/setup-base)" >> "$GITHUB_OUTPUT"
-      - uses: oven-sh/setup-bun@v2
-        if: steps.version.outputs.needed == 'true'
-        with:
-          bun-version: ${{ steps.bun.outputs.version }}
-
-      - name: Build and package
-        if: steps.version.outputs.needed == 'true'
-        run: |
-          bun install --frozen-lockfile
-          bun build --compile --minify mod/sidecar/main.ts --outfile mod/bin/terminal-sidecar
-          scripts/package.sh "$RUNNER_TEMP/terminal-${{ steps.version.outputs.version }}.zip"
-
-      - name: Publish the GitHub release
-        if: steps.version.outputs.needed == 'true'
-        run: |
-          gh release create "v${{ steps.version.outputs.version }}" "$RUNNER_TEMP/terminal-${{ steps.version.outputs.version }}.zip" \
-            --target "$GITHUB_SHA" --title "v${{ steps.version.outputs.version }}" --generate-notes
-
-      # 利用者が取得するのは、この書き換えが main に入った後。それまでは、1 つ前のリリースを指したまま。
-      # GITHUB_TOKEN での push は、ワークフローを起動しない。
-      - name: Point the marketplace at the new release
-        if: steps.version.outputs.needed == 'true'
-        run: |
-          version=${{ steps.version.outputs.version }}
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$version/terminal-$version.zip"
-          sha=$(sha256sum "$RUNNER_TEMP/terminal-$version.zip" | cut -d' ' -f1)
-          manifest=.claude-plugin/marketplace.json
-          jq --arg url "$url" --arg sha "$sha" \
-            '(.plugins[] | select(.name == "terminal") | .source) = { source: "archive", url: $url, sha256: $sha }' \
-            "$manifest" > "$RUNNER_TEMP/marketplace.json"
-          mv "$RUNNER_TEMP/marketplace.json" "$manifest"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Release $version: point the marketplace at the new archive" "$manifest"
-          git push origin HEAD:main
